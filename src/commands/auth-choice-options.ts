@@ -8,6 +8,8 @@ export type AuthChoiceOption = {
   label: string;
   hint?: string;
 };
+
+
 export type AuthChoiceGroup = {
   value: AuthChoiceGroupId;
   label: string;
@@ -130,6 +132,12 @@ const AUTH_CHOICE_GROUP_DEFS: {
     choices: ["huggingface-api-key"],
   },
   {
+    value: "novita",
+    label: "Novita AI",
+    hint: "API key",
+    choices: ["novita-api-key"],
+  },
+  {
     value: "venice",
     label: "Venice AI",
     hint: "Privacy-focused (uncensored models)",
@@ -226,6 +234,11 @@ export function buildAuthChoiceOptions(params: {
     value: "huggingface-api-key",
     label: "Hugging Face API key (HF token)",
     hint: "Inference Providers — OpenAI-compatible chat",
+  });
+  options.push({
+    value: "novita-api-key",
+    label: "Novita API key",
+    hint: "OpenAI-compatible access to 200+ latest frontier models",
   });
   options.push({
     value: "github-copilot",
