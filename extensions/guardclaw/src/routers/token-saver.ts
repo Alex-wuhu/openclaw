@@ -13,15 +13,10 @@
  */
 
 import { createHash } from "node:crypto";
+import type { GuardClawRouter, DetectionContext, EdgeProviderType, RouterDecision } from "../types.js";
 import { callChatCompletion } from "../local-model.js";
 import { loadPrompt } from "../prompt-loader.js";
 import { getGlobalCollector } from "../token-stats.js";
-import type {
-  GuardClawRouter,
-  DetectionContext,
-  EdgeProviderType,
-  RouterDecision,
-} from "../types.js";
 
 // ── Types ──
 
@@ -133,13 +128,7 @@ function resolveConfig(pluginConfig: Record<string, unknown>): TokenSaverConfig 
   const options = (tsConfig?.options ?? {}) as Record<string, unknown>;
 
   const privacyLocalModel = (pluginConfig?.privacy as Record<string, unknown>)?.localModel as
-    | {
-        endpoint?: string;
-        model?: string;
-        type?: EdgeProviderType;
-        module?: string;
-        apiKey?: string;
-      }
+    | { endpoint?: string; model?: string; type?: EdgeProviderType; module?: string; apiKey?: string }
     | undefined;
 
   return {
@@ -149,13 +138,19 @@ function resolveConfig(pluginConfig: Record<string, unknown>): TokenSaverConfig 
       privacyLocalModel?.endpoint ??
       DEFAULT_CONFIG.judgeEndpoint,
     judgeModel:
-      (options.judgeModel as string) ?? privacyLocalModel?.model ?? DEFAULT_CONFIG.judgeModel,
+      (options.judgeModel as string) ??
+      privacyLocalModel?.model ??
+      DEFAULT_CONFIG.judgeModel,
     judgeProviderType:
       (options.judgeProviderType as EdgeProviderType) ??
       privacyLocalModel?.type ??
       DEFAULT_CONFIG.judgeProviderType,
-    judgeCustomModule: (options.judgeCustomModule as string) ?? privacyLocalModel?.module,
-    judgeApiKey: (options.judgeApiKey as string) ?? privacyLocalModel?.apiKey,
+    judgeCustomModule:
+      (options.judgeCustomModule as string) ??
+      privacyLocalModel?.module,
+    judgeApiKey:
+      (options.judgeApiKey as string) ??
+      privacyLocalModel?.apiKey,
     tiers: {
       ...DEFAULT_CONFIG.tiers,
       ...((options.tiers as Record<string, { provider: string; model: string }>) ?? {}),
@@ -232,11 +227,7 @@ export const tokenSaverRouter: GuardClawRouter = {
 
       const tier = parseTier(result.text);
       classificationCache.set(cacheKey, { tier, ts: Date.now() });
-      const decision = buildDecision(tier, config);
-      console.log(
-        `[GuardClaw] [TokenSaver] tier=${tier} → redirect to ${decision.target?.provider}/${decision.target?.model}`,
-      );
-      return decision;
+      return buildDecision(tier, config);
     } catch (err) {
       console.error(`[GuardClaw] [TokenSaver] judge call failed:`, err);
       return { level: "S1", action: "passthrough", reason: "judge call failed — passthrough" };
@@ -246,12 +237,5 @@ export const tokenSaverRouter: GuardClawRouter = {
 
 // ── Exports for testing ──
 
-export {
-  parseTier,
-  hashPrompt,
-  classificationCache,
-  resolveConfig,
-  DEFAULT_CONFIG,
-  DEFAULT_JUDGE_PROMPT,
-};
+export { parseTier, hashPrompt, classificationCache, resolveConfig, DEFAULT_CONFIG, DEFAULT_JUDGE_PROMPT };
 export type { Tier, TokenSaverConfig };

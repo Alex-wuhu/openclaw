@@ -4,33 +4,38 @@
  * Main sensitivity detection engine that coordinates rule-based and model-based detection.
  */
 
-import { defaultPrivacyConfig } from "./config-schema.js";
-import { detectByLocalModel } from "./local-model.js";
-import { detectByRules } from "./rules.js";
 import type {
   Checkpoint,
   DetectionContext,
   DetectionResult,
   DetectorType,
   PrivacyConfig,
-  SensitivityLevel,
+  SensitivityLevel
 } from "./types.js";
 import { maxLevel } from "./types.js";
+import { detectByRules } from "./rules.js";
+import { detectByLocalModel } from "./local-model.js";
+import { defaultPrivacyConfig } from "./config-schema.js";
 
 /**
- * Main detection function that coordinates all detectors
+ * Main detection function that coordinates all detectors.
+ *
+ * Accepts either a raw `pluginConfig` (legacy — will merge with defaults)
+ * or a pre-merged `PrivacyConfig` via the `resolvedConfig` option to avoid
+ * double-merging when called from routers that already merged config.
  */
 export async function detectSensitivityLevel(
   context: DetectionContext,
   pluginConfig: Record<string, unknown>,
+  resolvedConfig?: PrivacyConfig,
 ): Promise<DetectionResult> {
-  const privacyConfig = mergeWithDefaults(
+  const privacyConfig = resolvedConfig ?? mergeWithDefaults(
     (pluginConfig?.privacy as PrivacyConfig) ?? {},
-    defaultPrivacyConfig,
+    defaultPrivacyConfig
   );
 
-  // Check if privacy is enabled
-  if (privacyConfig.enabled === false) {
+  // Check if privacy is enabled (skip when dry-run so dashboards get real classification)
+  if (privacyConfig.enabled === false && !context.dryRun) {
     return {
       level: "S1",
       levelNumeric: 1,
@@ -64,19 +69,21 @@ export async function detectSensitivityLevel(
 /**
  * Get configured detectors for a specific checkpoint
  */
-function getDetectorsForCheckpoint(checkpoint: Checkpoint, config: PrivacyConfig): DetectorType[] {
+function getDetectorsForCheckpoint(
+  checkpoint: Checkpoint,
+  config: PrivacyConfig
+): DetectorType[] {
   const checkpoints = config.checkpoints ?? {};
-  const fallback: DetectorType[] = ["localModelDetector"];
 
   switch (checkpoint) {
     case "onUserMessage":
-      return checkpoints.onUserMessage ?? fallback;
+      return checkpoints.onUserMessage ?? ["ruleDetector", "localModelDetector"];
     case "onToolCallProposed":
-      return checkpoints.onToolCallProposed ?? fallback;
+      return checkpoints.onToolCallProposed ?? ["ruleDetector"];
     case "onToolCallExecuted":
-      return checkpoints.onToolCallExecuted ?? fallback;
+      return checkpoints.onToolCallExecuted ?? ["ruleDetector"];
     default:
-      return fallback;
+      return ["ruleDetector"];
   }
 }
 
@@ -91,7 +98,7 @@ function getDetectorsForCheckpoint(checkpoint: Checkpoint, config: PrivacyConfig
 async function runDetectors(
   detectors: DetectorType[],
   context: DetectionContext,
-  config: PrivacyConfig,
+  config: PrivacyConfig
 ): Promise<DetectionResult[]> {
   const results: DetectionResult[] = [];
 
@@ -147,7 +154,9 @@ function mergeDetectionResults(results: DetectionResult[]): DetectionResult {
 
   // Collect reasons from all detectors that contributed to the decision
   const relevantResults = results.filter((r) => r.level === finalLevel);
-  const reasons = relevantResults.map((r) => r.reason).filter((r): r is string => Boolean(r));
+  const reasons = relevantResults
+    .map((r) => r.reason)
+    .filter((r): r is string => Boolean(r));
 
   // Calculate average confidence
   const confidences = results.map((r) => r.confidence ?? 0.5);
@@ -168,7 +177,10 @@ function mergeDetectionResults(results: DetectionResult[]): DetectionResult {
 /**
  * Merge user config with defaults
  */
-function mergeWithDefaults(userConfig: PrivacyConfig, defaults: PrivacyConfig): PrivacyConfig {
+function mergeWithDefaults(
+  userConfig: PrivacyConfig,
+  defaults: PrivacyConfig
+): PrivacyConfig {
   return {
     enabled: userConfig.enabled ?? defaults.enabled,
     checkpoints: {
@@ -200,10 +212,12 @@ function mergeWithDefaults(userConfig: PrivacyConfig, defaults: PrivacyConfig): 
     },
     localModel: {
       enabled: userConfig.localModel?.enabled ?? defaults.localModel?.enabled,
+      type: userConfig.localModel?.type ?? defaults.localModel?.type,
       provider: userConfig.localModel?.provider ?? defaults.localModel?.provider,
       model: userConfig.localModel?.model ?? defaults.localModel?.model,
       endpoint: userConfig.localModel?.endpoint ?? defaults.localModel?.endpoint,
       apiKey: userConfig.localModel?.apiKey ?? defaults.localModel?.apiKey,
+      module: userConfig.localModel?.module ?? defaults.localModel?.module,
     },
     guardAgent: {
       id: userConfig.guardAgent?.id ?? defaults.guardAgent?.id,
@@ -214,6 +228,9 @@ function mergeWithDefaults(userConfig: PrivacyConfig, defaults: PrivacyConfig): 
       isolateGuardHistory:
         userConfig.session?.isolateGuardHistory ?? defaults.session?.isolateGuardHistory,
       baseDir: userConfig.session?.baseDir ?? defaults.session?.baseDir,
+      injectDualHistory:
+        userConfig.session?.injectDualHistory ?? defaults.session?.injectDualHistory,
+      historyLimit: userConfig.session?.historyLimit ?? defaults.session?.historyLimit,
     },
   };
 }

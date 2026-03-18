@@ -34,7 +34,7 @@ describe("Rules Detector", () => {
           checkpoint: "onUserMessage",
           message: "Please read my id_rsa file",
         },
-        testConfig,
+        testConfig
       );
 
       expect(result.level).toBe("S3");
@@ -47,7 +47,7 @@ describe("Rules Detector", () => {
           checkpoint: "onUserMessage",
           message: "Here is my api_key for the service",
         },
-        testConfig,
+        testConfig
       );
 
       expect(result.level).toBe("S2");
@@ -60,7 +60,7 @@ describe("Rules Detector", () => {
           checkpoint: "onUserMessage",
           message: "What is the weather today?",
         },
-        testConfig,
+        testConfig
       );
 
       expect(result.level).toBe("S1");
@@ -72,7 +72,7 @@ describe("Rules Detector", () => {
           checkpoint: "onUserMessage",
           message: "My PASSWORD is secret123",
         },
-        testConfig,
+        testConfig
       );
 
       expect(result.level).toBe("S2");
@@ -87,7 +87,7 @@ describe("Rules Detector", () => {
           toolName: "system.run",
           toolParams: {},
         },
-        testConfig,
+        testConfig
       );
 
       expect(result.level).toBe("S3");
@@ -101,7 +101,7 @@ describe("Rules Detector", () => {
           toolName: "exec",
           toolParams: {},
         },
-        testConfig,
+        testConfig
       );
 
       expect(result.level).toBe("S2");
@@ -115,7 +115,7 @@ describe("Rules Detector", () => {
           toolName: "read_file",
           toolParams: { path: "/tmp/test.txt" },
         },
-        testConfig,
+        testConfig
       );
 
       expect(result.level).toBe("S1");
@@ -130,7 +130,7 @@ describe("Rules Detector", () => {
           toolName: "read",
           toolParams: { path: "~/.ssh/id_rsa" },
         },
-        testConfig,
+        testConfig
       );
 
       expect(result.level).toBe("S3");
@@ -144,7 +144,7 @@ describe("Rules Detector", () => {
           toolName: "read",
           toolParams: { path: "~/secrets/config.json" },
         },
-        testConfig,
+        testConfig
       );
 
       expect(result.level).toBe("S2");
@@ -158,7 +158,7 @@ describe("Rules Detector", () => {
           toolName: "read",
           toolParams: { path: "/tmp/certificate.pem" },
         },
-        testConfig,
+        testConfig
       );
 
       expect(result.level).toBe("S3");
@@ -173,7 +173,7 @@ describe("Rules Detector", () => {
           checkpoint: "onUserMessage",
           message: "Read my password from ~/.ssh/id_rsa",
         },
-        testConfig,
+        testConfig
       );
 
       expect(result.level).toBe("S3");

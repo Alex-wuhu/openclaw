@@ -8,16 +8,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { RouterPipeline } from "../src/router-pipeline.js";
 import type { GuardClawRouter, DetectionContext } from "../src/types.js";
 
-function makeRouter(
-  id: string,
-  decision: Partial<
-    Parameters<GuardClawRouter["detect"]> extends [infer _C, infer _P]
-      ? ReturnType<GuardClawRouter["detect"]> extends Promise<infer D>
-        ? D
-        : never
-      : never
-  >,
-): GuardClawRouter {
+function makeRouter(id: string, decision: Partial<Parameters<GuardClawRouter["detect"]> extends [infer _C, infer _P] ? ReturnType<GuardClawRouter["detect"]> extends Promise<infer D> ? D : never : never>): GuardClawRouter {
   return {
     id,
     async detect() {
@@ -66,14 +57,12 @@ describe("RouterPipeline", () => {
     });
 
     it("runs single router and returns its decision", async () => {
-      pipeline.register(
-        makeRouter("privacy", {
-          level: "S3",
-          action: "redirect",
-          target: { provider: "ollama", model: "llama3" },
-          reason: "SSH key detected",
-        }),
-      );
+      pipeline.register(makeRouter("privacy", {
+        level: "S3",
+        action: "redirect",
+        target: { provider: "ollama", model: "llama3" },
+        reason: "SSH key detected",
+      }));
 
       const result = await pipeline.run("onUserMessage", baseContext, {});
 
@@ -84,22 +73,18 @@ describe("RouterPipeline", () => {
     });
 
     it("merges multiple routers — highest level wins", async () => {
-      pipeline.register(
-        makeRouter("cost-router", {
-          level: "S1",
-          action: "redirect",
-          target: { provider: "openai", model: "gpt-4o-mini" },
-          reason: "cost optimization",
-        }),
-      );
-      pipeline.register(
-        makeRouter("privacy", {
-          level: "S2",
-          action: "redirect",
-          target: { provider: "guardclaw-privacy", model: "" },
-          reason: "PII detected",
-        }),
-      );
+      pipeline.register(makeRouter("cost-router", {
+        level: "S1",
+        action: "redirect",
+        target: { provider: "openai", model: "gpt-4o-mini" },
+        reason: "cost optimization",
+      }));
+      pipeline.register(makeRouter("privacy", {
+        level: "S2",
+        action: "redirect",
+        target: { provider: "guardclaw-privacy", model: "" },
+        reason: "PII detected",
+      }));
 
       const result = await pipeline.run("onUserMessage", baseContext, {});
 
@@ -108,20 +93,16 @@ describe("RouterPipeline", () => {
     });
 
     it("at same level, block > redirect > passthrough", async () => {
-      pipeline.register(
-        makeRouter("filter", {
-          level: "S2",
-          action: "redirect",
-          target: { provider: "openai", model: "gpt-4o" },
-        }),
-      );
-      pipeline.register(
-        makeRouter("blocker", {
-          level: "S2",
-          action: "block",
-          reason: "blocked by policy",
-        }),
-      );
+      pipeline.register(makeRouter("filter", {
+        level: "S2",
+        action: "redirect",
+        target: { provider: "openai", model: "gpt-4o" },
+      }));
+      pipeline.register(makeRouter("blocker", {
+        level: "S2",
+        action: "block",
+        reason: "blocked by policy",
+      }));
 
       const result = await pipeline.run("onUserMessage", baseContext, {});
 
@@ -136,21 +117,15 @@ describe("RouterPipeline", () => {
 
       const result = await pipeline.run("onUserMessage", baseContext, {});
 
-      expect(result.reason).toContain("[a] reason from A");
-      expect(result.reason).toContain("[b] reason from B");
+      expect(result.reason).toContain("[a:w50] reason from A");
+      expect(result.reason).toContain("[b:w50] reason from B");
     });
   });
 
   describe("Pipeline config", () => {
     it("respects pipeline checkpoint config", async () => {
       pipeline.register(makeRouter("privacy", { level: "S3", reason: "private" }));
-      pipeline.register(
-        makeRouter("cost", {
-          level: "S1",
-          action: "redirect",
-          target: { provider: "openai", model: "mini" },
-        }),
-      );
+      pipeline.register(makeRouter("cost", { level: "S1", action: "redirect", target: { provider: "openai", model: "mini" } }));
 
       pipeline.configure({
         pipeline: {
@@ -163,11 +138,7 @@ describe("RouterPipeline", () => {
       expect(userResult.level).toBe("S1");
       expect(userResult.routerId).toBe("cost");
 
-      const toolResult = await pipeline.run(
-        "onToolCallProposed",
-        { ...baseContext, checkpoint: "onToolCallProposed" },
-        {},
-      );
+      const toolResult = await pipeline.run("onToolCallProposed", { ...baseContext, checkpoint: "onToolCallProposed" }, {});
       expect(toolResult.level).toBe("S3");
       expect(toolResult.routerId).toBe("privacy");
     });

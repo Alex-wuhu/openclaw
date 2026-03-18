@@ -10,8 +10,8 @@
  */
 
 import { readFileSync, watch, type FSWatcher } from "node:fs";
-import { defaultPrivacyConfig } from "./config-schema.js";
 import type { PrivacyConfig } from "./types.js";
+import { defaultPrivacyConfig } from "./config-schema.js";
 
 let liveConfig: PrivacyConfig = { ...defaultPrivacyConfig } as PrivacyConfig;
 let configWatcher: FSWatcher | null = null;
@@ -26,7 +26,10 @@ export function initLiveConfig(pluginConfig: Record<string, unknown> | undefined
  * Watch guardclaw.json for external edits and hot-reload into liveConfig.
  * Uses a debounce to avoid reloading multiple times on rapid writes.
  */
-export function watchConfigFile(configPath: string, logger: { info: (msg: string) => void }): void {
+export function watchConfigFile(
+  configPath: string,
+  logger: { info: (msg: string) => void },
+): void {
   if (configWatcher) return;
   let debounce: ReturnType<typeof setTimeout> | null = null;
   try {
@@ -38,14 +41,10 @@ export function watchConfigFile(configPath: string, logger: { info: (msg: string
           const privacy = (raw.privacy ?? {}) as PrivacyConfig;
           liveConfig = mergeConfig(privacy);
           logger.info("[GuardClaw] guardclaw.json changed — config hot-reloaded");
-        } catch {
-          /* ignore parse errors from partial writes */
-        }
+        } catch { /* ignore parse errors from partial writes */ }
       }, 300);
     });
-  } catch {
-    /* file may not exist yet — non-fatal */
-  }
+  } catch { /* file may not exist yet — non-fatal */ }
 }
 
 /** Get the current live config (mutable, always up-to-date). */
@@ -56,11 +55,6 @@ export function getLiveConfig(): PrivacyConfig {
 /** Hot-update the live config. Called from Dashboard save handler. */
 export function updateLiveConfig(patch: Partial<PrivacyConfig>): void {
   liveConfig = mergeConfig({ ...liveConfig, ...patch });
-}
-
-/** Replace the entire privacy config in the live cache. */
-export function setLiveConfig(config: PrivacyConfig): void {
-  liveConfig = mergeConfig(config);
 }
 
 function mergeConfig(userConfig: PrivacyConfig): PrivacyConfig {
@@ -79,10 +73,14 @@ function mergeConfig(userConfig: PrivacyConfig): PrivacyConfig {
     localModel: { ...defaultPrivacyConfig.localModel, ...userConfig.localModel },
     guardAgent: { ...defaultPrivacyConfig.guardAgent, ...userConfig.guardAgent },
     session: { ...defaultPrivacyConfig.session, ...userConfig.session },
-    localProviders: [...defaultPrivacyConfig.localProviders, ...(userConfig.localProviders ?? [])],
+    localProviders: [
+      ...defaultPrivacyConfig.localProviders,
+      ...(userConfig.localProviders ?? []),
+    ],
     modelPricing: {
       ...defaultPrivacyConfig.modelPricing,
       ...userConfig.modelPricing,
     },
+    redaction: { ...defaultPrivacyConfig.redaction, ...userConfig.redaction },
   } as PrivacyConfig;
 }

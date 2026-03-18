@@ -13,7 +13,6 @@
  *   options.action: string          — action on match (default: "redirect")
  */
 
-import { callChatCompletion } from "../local-model.js";
 import type {
   DetectionContext,
   GuardClawRouter,
@@ -22,8 +21,11 @@ import type {
   SensitivityLevel,
   RouterRegistration,
 } from "../types.js";
-import { maxLevel, levelToNumeric } from "../types.js";
+import { maxLevel } from "../types.js";
+import { callChatCompletion } from "../local-model.js";
 import type { PrivacyConfig } from "../types.js";
+import { getGuardAgentConfig } from "../guard-agent.js";
+import { getKeywordRegex } from "../rules.js";
 
 export interface ConfigurableRouterOptions {
   keywords?: { S2?: string[]; S3?: string[] };
@@ -50,15 +52,13 @@ function checkKeywords(
   text: string,
   keywords: { S2?: string[]; S3?: string[] },
 ): { level: SensitivityLevel; reason?: string } {
-  const lower = text.toLowerCase();
-
   for (const kw of keywords.S3 ?? []) {
-    if (lower.includes(kw.toLowerCase())) {
+    if (getKeywordRegex(kw).test(text)) {
       return { level: "S3", reason: `S3 keyword: ${kw}` };
     }
   }
   for (const kw of keywords.S2 ?? []) {
-    if (lower.includes(kw.toLowerCase())) {
+    if (getKeywordRegex(kw).test(text)) {
       return { level: "S2", reason: `S2 keyword: ${kw}` };
     }
   }
@@ -74,18 +74,14 @@ function checkPatterns(
       if (new RegExp(pat, "i").test(text)) {
         return { level: "S3", reason: `S3 pattern: ${pat}` };
       }
-    } catch {
-      /* skip invalid regex */
-    }
+    } catch { /* skip invalid regex */ }
   }
   for (const pat of patterns.S2 ?? []) {
     try {
       if (new RegExp(pat, "i").test(text)) {
         return { level: "S2", reason: `S2 pattern: ${pat}` };
       }
-    } catch {
-      /* skip invalid regex */
-    }
+    } catch { /* skip invalid regex */ }
   }
   return { level: "S1" };
 }
@@ -111,14 +107,11 @@ async function classifyWithPrompt(
         temperature: 0,
         maxTokens: 256,
         apiKey: lm.apiKey,
-        providerType: (lm.type ?? "openai-compatible") as
-          | "openai-compatible"
-          | "ollama-native"
-          | "custom",
+        providerType: (lm.type ?? "openai-compatible") as "openai-compatible" | "ollama-native" | "custom",
         customModule: lm.module,
       },
     );
-    const text = raw.trim();
+    const text = raw.text.trim();
     const jsonMatch = text.match(/\{[\s\S]*?\}/);
     if (!jsonMatch) return null;
     const parsed = JSON.parse(jsonMatch[0]);
@@ -130,6 +123,36 @@ async function classifyWithPrompt(
   } catch {
     return null;
   }
+}
+
+/**
+ * Resolve the routing target for S2/S3, aligned with the privacy router's
+ * target resolution so hooks.ts can route correctly.
+ */
+function resolveTargetForLevel(
+  level: SensitivityLevel,
+  pluginConfig: Record<string, unknown>,
+): { provider: string; model: string } {
+  const pCfg = getPrivacyConfig(pluginConfig);
+  if (level === "S3") {
+    const guardCfg = getGuardAgentConfig(pCfg);
+    const defaultProvider = pCfg.localModel?.provider ?? "ollama";
+    return {
+      provider: guardCfg?.provider ?? defaultProvider,
+      model: guardCfg?.modelName ?? pCfg.localModel?.model ?? "openbmb/minicpm4.1",
+    };
+  }
+  // S2
+  const s2Policy = pCfg.s2Policy ?? "proxy";
+  if (s2Policy === "local") {
+    const guardCfg = getGuardAgentConfig(pCfg);
+    const defaultProvider = pCfg.localModel?.provider ?? "ollama";
+    return {
+      provider: guardCfg?.provider ?? defaultProvider,
+      model: guardCfg?.modelName ?? pCfg.localModel?.model ?? "openbmb/minicpm4.1",
+    };
+  }
+  return { provider: "guardclaw-privacy", model: "" };
 }
 
 /**
@@ -182,9 +205,16 @@ export function createConfigurableRouter(id: string): GuardClawRouter {
 
       const finalLevel = maxLevel(...levels);
       const action = (opts.action ?? "redirect") as RouterAction;
+
+      let target: { provider: string; model: string } | undefined;
+      if (finalLevel !== "S1" && action === "redirect") {
+        target = resolveTargetForLevel(finalLevel, pluginConfig);
+      }
+
       return {
         level: finalLevel,
         action,
+        target,
         reason: reasons.join("; "),
         confidence: levels.some((l) => l !== "S1") ? 0.8 : 0.5,
       };

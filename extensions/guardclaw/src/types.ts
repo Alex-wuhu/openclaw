@@ -74,6 +74,16 @@ export type PrivacyConfig = {
     isolateGuardHistory?: boolean;
     /** Base directory for session histories (default: ~/.openclaw) */
     baseDir?: string;
+    /**
+     * Inject full-track conversation history as context when routing to
+     * local models (S3 / S2-local). This replaces the sanitized placeholders
+     * ("🔒 [Private content]") with actual previous sensitive interactions
+     * so the local model has full conversational context.
+     * Default: true (when isolateGuardHistory is true)
+     */
+    injectDualHistory?: boolean;
+    /** Max number of messages to inject from dual-track history (default: 20) */
+    historyLimit?: number;
   };
   /**
    * Additional provider names to treat as "local" (safe for S3 routing).
@@ -82,16 +92,42 @@ export type PrivacyConfig = {
    */
   localProviders?: string[];
   /**
+   * Tool names exempt from privacy pipeline detection and PII redaction.
+   * Default: empty (no tools are exempt). Users can opt-in via config.
+   */
+  toolAllowlist?: string[];
+  /**
    * Per-model pricing for cloud API cost estimation (USD per 1M tokens).
    * Keys are model name strings; lookup tries exact match, then substring match.
    */
-  modelPricing?: Record<
-    string,
-    {
-      inputPer1M?: number;
-      outputPer1M?: number;
-    }
-  >;
+  modelPricing?: Record<string, {
+    inputPer1M?: number;
+    outputPer1M?: number;
+  }>;
+  /**
+   * Toggle high-false-positive redaction rules individually.
+   * All default to false (off) to avoid over-redaction.
+   */
+  redaction?: RedactionOptions;
+};
+
+export type RedactionOptions = {
+  /** Internal IP addresses (10.x, 172.16-31.x, 192.168.x). Default: false */
+  internalIp?: boolean;
+  /** Email addresses. Default: false */
+  email?: boolean;
+  /** .env file content (KEY=VALUE lines). Default: false */
+  envVar?: boolean;
+  /** Credit card number pattern (13-19 digits). Default: false */
+  creditCard?: boolean;
+  /** Chinese mobile phone number (1[3-9]x 11 digits). Default: false */
+  chinesePhone?: boolean;
+  /** Chinese ID card number (18 digits / 17+X). Default: false */
+  chineseId?: boolean;
+  /** Chinese address patterns (省/市/区/路/号 etc.). Default: false */
+  chineseAddress?: boolean;
+  /** PIN / pin code contextual rule. Default: false */
+  pin?: boolean;
 };
 
 export type DetectionContext = {
@@ -138,7 +174,10 @@ export type RouterDecision = {
  */
 export interface GuardClawRouter {
   id: string;
-  detect(context: DetectionContext, config: Record<string, unknown>): Promise<RouterDecision>;
+  detect(
+    context: DetectionContext,
+    config: Record<string, unknown>,
+  ): Promise<RouterDecision>;
 }
 
 export type RouterRegistration = {
@@ -169,8 +208,11 @@ export type PipelineConfig = {
 
 export type SessionPrivacyState = {
   sessionKey: string;
+  /** @deprecated Replaced by per-turn currentTurnLevel. Kept for backward compat. */
   isPrivate: boolean;
   highestLevel: SensitivityLevel;
+  /** Highest sensitivity level detected in the CURRENT turn (reset each turn). */
+  currentTurnLevel: SensitivityLevel;
   detectionHistory: Array<{
     timestamp: number;
     level: SensitivityLevel;
@@ -198,10 +240,13 @@ export function numericToLevel(numeric: SensitivityLevelNumeric): SensitivityLev
       return "S2";
     case 3:
       return "S3";
+    default:
+      return "S1";
   }
 }
 
 export function maxLevel(...levels: SensitivityLevel[]): SensitivityLevel {
+  if (levels.length === 0) return "S1";
   const numeric = levels.map(levelToNumeric);
   const max = Math.max(...numeric) as SensitivityLevelNumeric;
   return numericToLevel(max);

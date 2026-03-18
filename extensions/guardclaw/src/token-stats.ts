@@ -9,8 +9,8 @@
 
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { getLiveConfig } from "./live-config.js";
 import { getSessionHighestLevel } from "./session-state.js";
+import { getLiveConfig } from "./live-config.js";
 
 // ── Types ──
 
@@ -79,14 +79,7 @@ const MAX_HOURLY_BUCKETS = 72;
 const MAX_SESSIONS = 200;
 
 function emptyBucket(): TokenBucket {
-  return {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    totalTokens: 0,
-    requestCount: 0,
-    estimatedCost: 0,
-  };
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, totalTokens: 0, requestCount: 0, estimatedCost: 0 };
 }
 
 function emptySourceBuckets(): SourceBuckets {
@@ -115,7 +108,7 @@ function addToBucket(bucket: TokenBucket, usage: UsageEvent["usage"], cost = 0):
   bucket.inputTokens += input;
   bucket.outputTokens += output;
   bucket.cacheReadTokens += cacheRead;
-  bucket.totalTokens += usage?.total ?? input + output;
+  bucket.totalTokens += usage?.total ?? (input + output);
   bucket.requestCount += 1;
   bucket.estimatedCost += cost;
 }
@@ -126,10 +119,7 @@ function lookupPricing(model: string): { inputPer1M: number; outputPer1M: number
   if (!pricing) return { inputPer1M: 3, outputPer1M: 15 };
 
   if (pricing[model]) {
-    return {
-      inputPer1M: pricing[model].inputPer1M ?? 3,
-      outputPer1M: pricing[model].outputPer1M ?? 15,
-    };
+    return { inputPer1M: pricing[model].inputPer1M ?? 3, outputPer1M: pricing[model].outputPer1M ?? 15 };
   }
 
   const lowerModel = model.toLowerCase();
@@ -183,10 +173,9 @@ export class TokenStatsCollector {
     try {
       const raw = await readFile(this.filePath, "utf-8");
       const parsed = JSON.parse(raw) as Partial<TokenStatsData>;
-      const rawSessions =
-        parsed.sessions && typeof parsed.sessions === "object"
-          ? (parsed.sessions as Record<string, SessionTokenStats>)
-          : {};
+      const rawSessions = (parsed.sessions && typeof parsed.sessions === "object")
+        ? parsed.sessions as Record<string, SessionTokenStats>
+        : {};
       const parsedBySource = parsed.bySource as Partial<SourceBuckets> | undefined;
       this.data = {
         lifetime: {
@@ -233,7 +222,9 @@ export class TokenStatsCollector {
     const source: TokenSource = event.source ?? "task";
     const now = Date.now();
 
-    const cost = category !== "local" ? calculateCost(event.model, event.usage) : 0;
+    const cost = category !== "local"
+      ? calculateCost(event.model, event.usage)
+      : 0;
 
     addToBucket(this.data.lifetime[category], event.usage, cost);
     addToBucket(this.data.bySource[source], event.usage, cost);
@@ -241,13 +232,7 @@ export class TokenStatsCollector {
     const hourKey = currentHourKey();
     let hourly = this.data.hourly.find((h) => h.hour === hourKey);
     if (!hourly) {
-      hourly = {
-        hour: hourKey,
-        cloud: emptyBucket(),
-        local: emptyBucket(),
-        proxy: emptyBucket(),
-        bySource: emptySourceBuckets(),
-      };
+      hourly = { hour: hourKey, cloud: emptyBucket(), local: emptyBucket(), proxy: emptyBucket(), bySource: emptySourceBuckets() };
       this.data.hourly.push(hourly);
       if (this.data.hourly.length > MAX_HOURLY_BUCKETS) {
         this.data.hourly = this.data.hourly.slice(-MAX_HOURLY_BUCKETS);
@@ -302,12 +287,7 @@ export class TokenStatsCollector {
   }
 
   /** Get summary for API response. */
-  getSummary(): {
-    lifetime: TokenStatsData["lifetime"];
-    bySource: SourceBuckets;
-    lastUpdatedAt: number;
-    startedAt: number;
-  } {
+  getSummary(): { lifetime: TokenStatsData["lifetime"]; bySource: SourceBuckets; lastUpdatedAt: number; startedAt: number } {
     return {
       lifetime: this.data.lifetime,
       bySource: this.data.bySource,
@@ -323,7 +303,9 @@ export class TokenStatsCollector {
 
   /** Get per-session stats sorted by lastActiveAt descending. */
   getSessionStats(): SessionTokenStats[] {
-    return Object.values(this.data.sessions).sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+    return Object.values(this.data.sessions).sort(
+      (a, b) => b.lastActiveAt - a.lastActiveAt,
+    );
   }
 
   /** Reset all stats to empty and flush to disk. */

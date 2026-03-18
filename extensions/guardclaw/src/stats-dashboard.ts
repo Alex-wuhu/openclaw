@@ -15,17 +15,17 @@
  *   - POST /plugins/guardclaw/stats/api/test-classify → dry-run pipeline classification
  */
 
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { getGlobalCollector } from "./token-stats.js";
 import { getLiveConfig, updateLiveConfig } from "./live-config.js";
-import { DEFAULT_DETECTION_SYSTEM_PROMPT, DEFAULT_PII_EXTRACTION_PROMPT } from "./local-model.js";
+import { getAllSessionStates } from "./session-state.js";
 import { loadPrompt, readPromptFromDisk, writePrompt } from "./prompt-loader.js";
+import { DEFAULT_JUDGE_PROMPT } from "./routers/token-saver.js";
+import { DEFAULT_DETECTION_SYSTEM_PROMPT, DEFAULT_PII_EXTRACTION_PROMPT } from "./local-model.js";
 import type { RouterPipeline } from "./router-pipeline.js";
 import { createConfigurableRouter } from "./routers/configurable.js";
-import { DEFAULT_JUDGE_PROMPT } from "./routers/token-saver.js";
-import { getAllSessionStates } from "./session-state.js";
-import { getGlobalCollector } from "./token-stats.js";
 import {
   getLastReplyLoopSummary,
   getLastReplyModelOrigin,
@@ -33,7 +33,11 @@ import {
 } from "./usage-intel.js";
 import { getCurrentLoopHighestLevel } from "./loop-detection-level.js";
 
-const GUARDCLAW_CONFIG_PATH = join(process.env.HOME ?? "/tmp", ".openclaw", "guardclaw.json");
+const GUARDCLAW_CONFIG_PATH = join(
+  process.env.HOME ?? "/tmp",
+  ".openclaw",
+  "guardclaw.json",
+);
 
 function saveGuardClawConfig(privacy: Record<string, unknown>): void {
   try {
@@ -41,13 +45,8 @@ function saveGuardClawConfig(privacy: Record<string, unknown>): void {
     mkdirSync(dir, { recursive: true });
     let existing: Record<string, unknown> = {};
     try {
-      existing = JSON.parse(readFileSync(GUARDCLAW_CONFIG_PATH, "utf-8")) as Record<
-        string,
-        unknown
-      >;
-    } catch {
-      /* file may not exist yet */
-    }
+      existing = JSON.parse(readFileSync(GUARDCLAW_CONFIG_PATH, "utf-8")) as Record<string, unknown>;
+    } catch { /* file may not exist yet */ }
     const updated = { ...existing, privacy };
     writeFileSync(GUARDCLAW_CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
   } catch {
@@ -106,38 +105,28 @@ export async function statsHttpHandler(
 
   if (req.method === "GET" && sub === "/api/summary") {
     const collector = getGlobalCollector();
-    if (!collector) {
-      json(res, { error: "not initialized" }, 503);
-      return true;
-    }
+    if (!collector) { json(res, { error: "not initialized" }, 503); return true; }
     json(res, collector.getSummary());
     return true;
   }
 
   if (req.method === "GET" && sub === "/api/hourly") {
     const collector = getGlobalCollector();
-    if (!collector) {
-      json(res, { error: "not initialized" }, 503);
-      return true;
-    }
+    if (!collector) { json(res, { error: "not initialized" }, 503); return true; }
     json(res, collector.getHourly());
     return true;
   }
 
   if (req.method === "GET" && sub === "/api/sessions") {
     const collector = getGlobalCollector();
-    if (!collector) {
-      json(res, { error: "not initialized" }, 503);
-      return true;
-    }
+    if (!collector) { json(res, { error: "not initialized" }, 503); return true; }
     json(res, collector.getSessionStats());
     return true;
   }
 
   if (req.method === "GET" && sub === "/api/current-loop-highest-level") {
     const sessionKey = parsedUrl.searchParams.get("sessionKey") ?? undefined;
-    const data = getCurrentLoopHighestLevel(sessionKey);
-    json(res, data);
+    json(res, getCurrentLoopHighestLevel(sessionKey));
     return true;
   }
 
@@ -177,10 +166,7 @@ export async function statsHttpHandler(
 
   if (req.method === "POST" && sub === "/api/reset") {
     const collector = getGlobalCollector();
-    if (!collector) {
-      json(res, { error: "not initialized" }, 503);
-      return true;
-    }
+    if (!collector) { json(res, { error: "not initialized" }, 503); return true; }
     await collector.reset();
     json(res, { ok: true });
     return true;
@@ -234,18 +220,14 @@ export async function statsHttpHandler(
   }
 
   if (req.method === "POST" && sub === "/api/config") {
-    if (!deps) {
-      json(res, { error: "dashboard not initialized" }, 503);
-      return true;
-    }
+    if (!deps) { json(res, { error: "dashboard not initialized" }, 503); return true; }
     try {
       const body = JSON.parse(await readBody(req));
 
       if (body.privacy) {
         updateLiveConfig(body.privacy);
 
-        const existingPrivacy = ((deps.pluginConfig as Record<string, unknown>).privacy ??
-          {}) as Record<string, unknown>;
+        const existingPrivacy = ((deps.pluginConfig as Record<string, unknown>).privacy ?? {}) as Record<string, unknown>;
         const mergedPrivacy = { ...existingPrivacy, ...body.privacy } as Record<string, unknown>;
 
         // Persist to guardclaw.json (does NOT touch openclaw.json → no restart)
@@ -253,10 +235,7 @@ export async function statsHttpHandler(
 
         // Dynamically register/update configurable routers in the pipeline
         if (body.privacy.routers && deps.pipeline) {
-          const routers = body.privacy.routers as Record<
-            string,
-            { type?: string; enabled?: boolean }
-          >;
+          const routers = body.privacy.routers as Record<string, { type?: string; enabled?: boolean }>;
           for (const [id, reg] of Object.entries(routers)) {
             if (reg.type === "configurable" && !deps.pipeline.hasRouter(id)) {
               deps.pipeline.register(
@@ -268,10 +247,7 @@ export async function statsHttpHandler(
           // Re-configure pipeline with updated router configs and order
           const mergedPrivacy = { ...existingPrivacy, ...body.privacy } as Record<string, unknown>;
           deps.pipeline.configure({
-            routers: mergedPrivacy.routers as Record<
-              string,
-              Parameters<typeof deps.pipeline.register>[1]
-            >,
+            routers: mergedPrivacy.routers as Record<string, Parameters<typeof deps.pipeline.register>[1]>,
             pipeline: mergedPrivacy.pipeline as Record<string, string[]>,
           });
           // Update deps.pluginConfig so test-classify picks up new options
@@ -289,25 +265,13 @@ export async function statsHttpHandler(
   // ── Prompts API ──
 
   const EDITABLE_PROMPTS: Record<string, { label: string; defaultContent: string }> = {
-    "detection-system": {
-      label: "Privacy Detection (S1/S2/S3 Classifier)",
-      defaultContent: DEFAULT_DETECTION_SYSTEM_PROMPT,
-    },
-    "token-saver-judge": {
-      label: "Token-Saver (Task Complexity Judge)",
-      defaultContent: DEFAULT_JUDGE_PROMPT,
-    },
-    "pii-extraction": {
-      label: "PII Extraction Engine",
-      defaultContent: DEFAULT_PII_EXTRACTION_PROMPT,
-    },
+    "detection-system": { label: "Privacy Detection (S1/S2/S3 Classifier)", defaultContent: DEFAULT_DETECTION_SYSTEM_PROMPT },
+    "token-saver-judge": { label: "Token-Saver (Task Complexity Judge)", defaultContent: DEFAULT_JUDGE_PROMPT },
+    "pii-extraction": { label: "PII Extraction Engine", defaultContent: DEFAULT_PII_EXTRACTION_PROMPT },
   };
 
   if (req.method === "GET" && sub === "/api/prompts") {
-    const result: Record<
-      string,
-      { label: string; content: string; isCustom: boolean; defaultContent: string }
-    > = {};
+    const result: Record<string, { label: string; content: string; isCustom: boolean; defaultContent: string }> = {};
     for (const [name, meta] of Object.entries(EDITABLE_PROMPTS)) {
       const fromDisk = readPromptFromDisk(name);
       result[name] = {
@@ -344,24 +308,14 @@ export async function statsHttpHandler(
   // ── Test Classify API ──
 
   if (req.method === "POST" && sub === "/api/test-classify") {
-    if (!deps?.pipeline) {
-      json(res, { error: "pipeline not initialized" }, 503);
-      return true;
-    }
+    if (!deps?.pipeline) { json(res, { error: "pipeline not initialized" }, 503); return true; }
     try {
-      const body = JSON.parse(await readBody(req)) as {
-        message: string;
-        checkpoint?: string;
-        router?: string;
-      };
+      const body = JSON.parse(await readBody(req)) as { message: string; checkpoint?: string; router?: string };
       if (!body.message?.trim()) {
         json(res, { error: "message required" }, 400);
         return true;
       }
-      const checkpoint = (body.checkpoint ?? "onUserMessage") as
-        | "onUserMessage"
-        | "onToolCallProposed"
-        | "onToolCallExecuted";
+      const checkpoint = (body.checkpoint ?? "onUserMessage") as "onUserMessage" | "onToolCallProposed" | "onToolCallExecuted";
 
       if (body.router) {
         const decision = await deps.pipeline.runSingle(
@@ -1106,6 +1060,19 @@ function dashboardHtml(): string {
   </div>
 
   <div class="config-section">
+    <h3><span data-i18n="cfg.redaction">Rule-based Redaction</span> <span class="badge badge-hot">instant</span></h3>
+    <div class="hint" style="margin-bottom:14px" data-i18n="cfg.redaction_desc">Toggle individual PII pattern rules. Off by default to reduce false positives.</div>
+    <div class="field-toggle"><label data-i18n="cfg.rd_ip">Internal IP Addresses (10.x, 172.x, 192.168.x)</label><label class="toggle"><input type="checkbox" id="cfg-rd-internalIp"><span class="slider"></span></label></div>
+    <div class="field-toggle"><label data-i18n="cfg.rd_email">Email Addresses</label><label class="toggle"><input type="checkbox" id="cfg-rd-email"><span class="slider"></span></label></div>
+    <div class="field-toggle"><label data-i18n="cfg.rd_env">Environment Variables (.env KEY=VALUE)</label><label class="toggle"><input type="checkbox" id="cfg-rd-envVar"><span class="slider"></span></label></div>
+    <div class="field-toggle"><label data-i18n="cfg.rd_card">Credit Card Numbers (13-19 digits)</label><label class="toggle"><input type="checkbox" id="cfg-rd-creditCard"><span class="slider"></span></label></div>
+    <div class="field-toggle"><label data-i18n="cfg.rd_phone">Chinese Mobile Phone (1[3-9]x)</label><label class="toggle"><input type="checkbox" id="cfg-rd-chinesePhone"><span class="slider"></span></label></div>
+    <div class="field-toggle"><label data-i18n="cfg.rd_id">Chinese ID Card (18 digits)</label><label class="toggle"><input type="checkbox" id="cfg-rd-chineseId"><span class="slider"></span></label></div>
+    <div class="field-toggle"><label data-i18n="cfg.rd_addr">Chinese Addresses</label><label class="toggle"><input type="checkbox" id="cfg-rd-chineseAddress"><span class="slider"></span></label></div>
+    <div class="field-toggle"><label data-i18n="cfg.rd_pin">PIN / Pin Code</label><label class="toggle"><input type="checkbox" id="cfg-rd-pin"><span class="slider"></span></label></div>
+  </div>
+
+  <div class="config-section">
     <h3><span data-i18n="cfg.local_prov">Local Providers</span> <span class="badge badge-hot">instant</span></h3>
     <div class="field">
       <label data-i18n="cfg.local_prov_hint">Additional providers treated as &quot;local&quot; (safe for confidential data routing)</label>
@@ -1320,6 +1287,16 @@ var T = {
   'cfg.pricing_output':{en:'Output $/1M',zh:'输出 $/1M'},
   'cfg.pricing_add':{en:'Add Model',zh:'添加模型'},
   'cfg.pricing_load':{en:'Load Defaults',zh:'加载默认'},
+  'cfg.redaction':{en:'Rule-based Redaction',zh:'规则脱敏'},
+  'cfg.redaction_desc':{en:'Toggle individual PII pattern rules. Off by default to reduce false positives.',zh:'控制各条 PII 正则规则的启停，默认关闭以减少误报。'},
+  'cfg.rd_ip':{en:'Internal IP Addresses (10.x, 172.x, 192.168.x)',zh:'内网 IP 地址 (10.x, 172.x, 192.168.x)'},
+  'cfg.rd_email':{en:'Email Addresses',zh:'电子邮箱'},
+  'cfg.rd_env':{en:'Environment Variables (.env KEY=VALUE)',zh:'环境变量 (.env KEY=VALUE)'},
+  'cfg.rd_card':{en:'Credit Card Numbers (13-19 digits)',zh:'信用卡号 (13-19 位)'},
+  'cfg.rd_phone':{en:'Chinese Mobile Phone (1[3-9]x)',zh:'中国手机号 (1[3-9]x)'},
+  'cfg.rd_id':{en:'Chinese ID Card (18 digits)',zh:'中国身份证 (18 位)'},
+  'cfg.rd_addr':{en:'Chinese Addresses',zh:'中国地址'},
+  'cfg.rd_pin':{en:'PIN / Pin Code',zh:'PIN 码'},
   'cfg.save':{en:'Save Configuration',zh:'保存配置'},
   'cfg.saved':{en:'Configuration saved',zh:'配置已保存'},
   'common.add':{en:'Add',zh:'添加'},
@@ -1823,6 +1800,12 @@ async function loadConfig() {
     document.getElementById('cfg-sess-isolate').checked = sess.isolateGuardHistory !== false;
     document.getElementById('cfg-sess-basedir').value = sess.baseDir || '';
 
+    var rd = p.redaction || {};
+    ['internalIp','email','envVar','creditCard','chinesePhone','chineseId','chineseAddress','pin'].forEach(function(k) {
+      var el = document.getElementById('cfg-rd-' + k);
+      if (el) el.checked = !!rd[k];
+    });
+
     _checkpoints.um = Array.isArray(ck.onUserMessage) ? ck.onUserMessage.slice() : [];
     _checkpoints.tcp = Array.isArray(ck.onToolCallProposed) ? ck.onToolCallProposed.slice() : [];
     _checkpoints.tce = Array.isArray(ck.onToolCallExecuted) ? ck.onToolCallExecuted.slice() : [];
@@ -1904,6 +1887,14 @@ async function saveConfig() {
           isolateGuardHistory: document.getElementById('cfg-sess-isolate').checked,
           baseDir: document.getElementById('cfg-sess-basedir').value || undefined,
         },
+        redaction: (function() {
+          var rd = {};
+          ['internalIp','email','envVar','creditCard','chinesePhone','chineseId','chineseAddress','pin'].forEach(function(k) {
+            var el = document.getElementById('cfg-rd-' + k);
+            if (el) rd[k] = el.checked;
+          });
+          return rd;
+        })(),
       },
     };
     var res = await fetch(BASE + '/config', {

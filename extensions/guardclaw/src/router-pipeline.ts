@@ -27,17 +27,9 @@ export class RouterPipeline {
   private routers = new Map<string, GuardClawRouter>();
   private pipelineConfig: PipelineConfig = {};
   private routerConfigs = new Map<string, RouterRegistration>();
-  private logger: {
-    info: (m: string) => void;
-    warn: (m: string) => void;
-    error: (m: string) => void;
-  };
+  private logger: { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void };
 
-  constructor(logger?: {
-    info: (m: string) => void;
-    warn: (m: string) => void;
-    error: (m: string) => void;
-  }) {
+  constructor(logger?: { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void }) {
     this.logger = logger ?? {
       info: (m: string) => console.log(m),
       warn: (m: string) => console.warn(m),
@@ -59,26 +51,18 @@ export class RouterPipeline {
   /**
    * Load a custom router from a module path.
    */
-  async loadCustomRouter(
-    id: string,
-    modulePath: string,
-    registration?: RouterRegistration,
-  ): Promise<void> {
+  async loadCustomRouter(id: string, modulePath: string, registration?: RouterRegistration): Promise<void> {
     try {
       const mod = await import(modulePath);
       const router: GuardClawRouter = mod.default ?? mod;
       if (!router.detect || typeof router.detect !== "function") {
-        this.logger.error(
-          `[RouterPipeline] Custom router "${id}" from ${modulePath} does not export a valid detect() function`,
-        );
+        this.logger.error(`[RouterPipeline] Custom router "${id}" from ${modulePath} does not export a valid detect() function`);
         return;
       }
       router.id = id;
       this.register(router, registration);
     } catch (err) {
-      this.logger.error(
-        `[RouterPipeline] Failed to load custom router "${id}" from ${modulePath}: ${String(err)}`,
-      );
+      this.logger.error(`[RouterPipeline] Failed to load custom router "${id}" from ${modulePath}: ${String(err)}`);
     }
   }
 
@@ -172,9 +156,7 @@ export class RouterPipeline {
       if (!this.isRouterEnabled(id)) continue;
       const router = this.routers.get(id);
       if (!router) {
-        this.logger.warn(
-          `[RouterPipeline] Router "${id}" referenced in pipeline but not registered`,
-        );
+        this.logger.warn(`[RouterPipeline] Router "${id}" referenced in pipeline but not registered`);
         continue;
       }
       const weight = this.getRouterWeight(id);
@@ -197,8 +179,7 @@ export class RouterPipeline {
     const mustShortCircuit = fastResults.some((r) => {
       if (r.decision.level === "S1" || r.decision.action === "passthrough") return false;
       // S2 via privacy proxy can benefit from Phase 2 (e.g. TokenSaver model selection)
-      if (r.decision.level === "S2" && r.decision.target?.provider === "guardclaw-privacy")
-        return false;
+      if (r.decision.level === "S2" && r.decision.target?.provider === "guardclaw-privacy") return false;
       return true;
     });
 
@@ -249,9 +230,7 @@ export class RouterPipeline {
         const d = result.value;
         const reasonStr = d.reason ? ` (${d.reason})` : "";
         const targetStr = d.target ? ` → ${d.target.provider}/${d.target.model}` : "";
-        this.logger.info(
-          `[GuardClaw] [${context.checkpoint}] ${id}: ${d.level} ${d.action ?? "passthrough"}${targetStr}${reasonStr}`,
-        );
+        this.logger.info(`[GuardClaw] [${context.checkpoint}] ${id}: ${d.level} ${d.action ?? "passthrough"}${targetStr}${reasonStr}`);
         results.push({ decision: d, weight });
       } else {
         this.logger.error(`[RouterPipeline] Router "${id}" failed: ${String(result.reason)}`);
@@ -265,10 +244,7 @@ export class RouterPipeline {
     const targetStr = d.target ? ` → ${d.target.provider}/${d.target.model}` : "";
     const reasonStr = d.reason ? ` (${d.reason})` : "";
     const log = d.level === "S1" ? this.logger.info : this.logger.warn;
-    log.call(
-      this.logger,
-      `[GuardClaw] [${checkpoint}] ▶ Final: ${d.level} ${d.action ?? "passthrough"}${targetStr}${reasonStr}`,
-    );
+    log.call(this.logger, `[GuardClaw] [${checkpoint}] ▶ Final: ${d.level} ${d.action ?? "passthrough"}${targetStr}${reasonStr}`);
   }
 
   /**

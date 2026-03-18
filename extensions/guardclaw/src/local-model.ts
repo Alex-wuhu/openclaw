@@ -7,9 +7,6 @@
  *   - "custom":            User-supplied module with callChat() export
  */
 
-import { loadPrompt, loadPromptWithVars } from "./prompt-loader.js";
-import { getGlobalCollector } from "./token-stats.js";
-import { recordRouterOperation } from "./usage-intel.js";
 import type {
   DetectionContext,
   DetectionResult,
@@ -17,7 +14,10 @@ import type {
   PrivacyConfig,
   SensitivityLevel,
 } from "./types.js";
+import { loadPrompt, loadPromptWithVars } from "./prompt-loader.js";
 import { levelToNumeric } from "./types.js";
+import { getGlobalCollector } from "./token-stats.js";
+import { recordRouterOperation } from "./usage-intel.js";
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
@@ -27,7 +27,7 @@ export type ChatCompletionOptions = {
   stop?: string[];
   frequencyPenalty?: number;
   apiKey?: string;
-  /** Force-disable reasoning/thinking output for compatible backends. */
+  /** Force-disable reasoning output for compatible backends. */
   disableThinking?: boolean;
 };
 
@@ -55,12 +55,12 @@ export interface CustomEdgeProvider {
   ): Promise<string>;
 }
 
-let _customProviderCache: Map<string, CustomEdgeProvider> = new Map();
+const _customProviderCache: Map<string, CustomEdgeProvider> = new Map();
 
 async function loadCustomProvider(modulePath: string): Promise<CustomEdgeProvider> {
   const cached = _customProviderCache.get(modulePath);
   if (cached) return cached;
-  const mod = (await import(modulePath)) as CustomEdgeProvider;
+  const mod = await import(modulePath) as CustomEdgeProvider;
   if (typeof mod.callChat !== "function") {
     throw new Error(`Custom edge provider at "${modulePath}" must export a callChat() function`);
   }
@@ -82,7 +82,6 @@ export async function callChatCompletion(
   options?: ChatCompletionOptions & { providerType?: EdgeProviderType; customModule?: string },
 ): Promise<ChatCompletionResult> {
   const providerType = options?.providerType ?? "openai-compatible";
-  console.log(`[GuardClaw] [DEBUG] calling LLM: ${endpoint} ${model} (${providerType})`);
 
   let result: ChatCompletionResult;
   switch (providerType) {
@@ -103,7 +102,6 @@ export async function callChatCompletion(
       result = await callOpenAICompatible(endpoint, model, messages, options);
       break;
   }
-  console.log(`[GuardClaw] [DEBUG] LLM response (${model}): ${result.text.slice(0, 200)}`);
   return result;
 }
 
@@ -111,6 +109,8 @@ export async function callChatCompletion(
  * OpenAI-compatible chat completions call.
  * POST ${endpoint}/v1/chat/completions — works with Ollama, vLLM, LiteLLM, LocalAI, LMStudio, SGLang, TGI, etc.
  */
+const GUARDCLAW_FETCH_TIMEOUT_MS = 60_000;
+
 async function callOpenAICompatible(
   endpoint: string,
   model: string,
@@ -132,17 +132,23 @@ async function callOpenAICompatible(
       messages,
       temperature: options?.temperature ?? 0.1,
       max_tokens: options?.maxTokens ?? 800,
-      stream: false,
+      stream: true,
       ...(options?.stop ? { stop: options.stop } : {}),
       ...(options?.frequencyPenalty != null ? { frequency_penalty: options.frequencyPenalty } : {}),
       ...(options?.disableThinking
         ? { chat_template_kwargs: { enable_thinking: false } }
         : {}),
     }),
+    signal: AbortSignal.timeout(GUARDCLAW_FETCH_TIMEOUT_MS),
   });
 
   if (!response.ok) {
     throw new Error(`Chat completions API error: ${response.status} ${response.statusText}`);
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("text/event-stream") && response.body) {
+    return await consumeSSEStream(response.body);
   }
 
   const data = (await response.json()) as {
@@ -156,12 +162,64 @@ async function callOpenAICompatible(
     ? {
         input: data.usage.prompt_tokens ?? 0,
         output: data.usage.completion_tokens ?? 0,
-        total:
-          data.usage.total_tokens ??
-          (data.usage.prompt_tokens ?? 0) + (data.usage.completion_tokens ?? 0),
+        total: data.usage.total_tokens ?? (data.usage.prompt_tokens ?? 0) + (data.usage.completion_tokens ?? 0),
       }
     : undefined;
 
+  return { text, usage };
+}
+
+async function consumeSSEStream(
+  body: ReadableStream<Uint8Array>,
+): Promise<ChatCompletionResult> {
+  const decoder = new TextDecoder();
+  const reader = body.getReader();
+  let textParts: string[] = [];
+  let usage: LlmUsageInfo | undefined;
+  let buffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const payload = trimmed.slice(5).trim();
+        if (payload === "[DONE]") continue;
+
+        try {
+          const chunk = JSON.parse(payload) as {
+            choices?: Array<{ delta?: { content?: string; reasoning_content?: string } }>;
+            usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+          };
+          const delta = chunk.choices?.[0]?.delta;
+          if (delta?.content) {
+            textParts.push(delta.content);
+          }
+          if (chunk.usage) {
+            usage = {
+              input: chunk.usage.prompt_tokens ?? 0,
+              output: chunk.usage.completion_tokens ?? 0,
+              total: chunk.usage.total_tokens ?? 0,
+            };
+          }
+        } catch {
+          // skip malformed SSE chunks
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  let text = textParts.join("");
+  text = stripThinkingTags(text);
   return { text, usage };
 }
 
@@ -188,9 +246,7 @@ async function callOllamaNative(
         temperature: options?.temperature ?? 0.1,
         num_predict: options?.maxTokens ?? 800,
         ...(options?.stop ? { stop: options.stop } : {}),
-        ...(options?.frequencyPenalty != null
-          ? { repeat_penalty: 1.0 + (options.frequencyPenalty ?? 0) }
-          : {}),
+        ...(options?.frequencyPenalty != null ? { repeat_penalty: 1.0 + (options.frequencyPenalty ?? 0) } : {}),
       },
     }),
   });
@@ -209,10 +265,9 @@ async function callOllamaNative(
 
   const promptTokens = data.prompt_eval_count ?? 0;
   const outputTokens = data.eval_count ?? 0;
-  const usage: LlmUsageInfo | undefined =
-    promptTokens || outputTokens
-      ? { input: promptTokens, output: outputTokens, total: promptTokens + outputTokens }
-      : undefined;
+  const usage: LlmUsageInfo | undefined = (promptTokens || outputTokens)
+    ? { input: promptTokens, output: outputTokens, total: promptTokens + outputTokens }
+    : undefined;
 
   return { text, usage };
 }
@@ -394,7 +449,7 @@ async function callLocalModel(
     ],
     {
       temperature: 0.1,
-      maxTokens: 32768,
+      maxTokens: 800,
       apiKey: config.localModel?.apiKey,
       disableThinking: true,
       providerType,
@@ -414,9 +469,9 @@ export async function desensitizeWithLocalModel(
   content: string,
   config: PrivacyConfig,
   sessionKey?: string,
-): Promise<{ desensitized: string; wasModelUsed: boolean }> {
+): Promise<{ desensitized: string; wasModelUsed: boolean; failed?: boolean }> {
   if (!config.localModel?.enabled) {
-    return { desensitized: content, wasModelUsed: false };
+    return { desensitized: content, wasModelUsed: false, failed: true };
   }
 
   try {
@@ -451,7 +506,7 @@ export async function desensitizeWithLocalModel(
     return { desensitized: redacted, wasModelUsed: true };
   } catch (err) {
     console.error("[GuardClaw] Local model desensitization failed:", err);
-    return { desensitized: content, wasModelUsed: false };
+    return { desensitized: content, wasModelUsed: false, failed: true };
   }
 }
 
@@ -554,7 +609,7 @@ async function extractPiiWithModel(
     ],
     {
       temperature: 0.0,
-      maxTokens: 32768,
+      maxTokens: 2500,
       stop: ["Input:", "Task:"],
       apiKey: opts?.apiKey,
       disableThinking: true,
@@ -616,10 +671,6 @@ function parsePiiJson(raw: string): Array<{ type: string; value: string }> {
     .replace(/(?<=[\[,{]\s*)'([^']+?)'(?=\s*:)/g, '"$1"')
     .replace(/(?<=:\s*)'([^']*?)'(?=\s*[,}\]])/g, '"$1"');
 
-  console.log(
-    `[GuardClaw] PII extraction raw JSON (${jsonStr.length} chars): ${jsonStr.slice(0, 300)}...`,
-  );
-
   try {
     const arr = JSON.parse(jsonStr);
     if (!Array.isArray(arr)) return [];
@@ -630,9 +681,6 @@ function parsePiiJson(raw: string): Array<{ type: string; value: string }> {
         typeof (item as Record<string, unknown>).type === "string" &&
         typeof (item as Record<string, unknown>).value === "string",
     ) as Array<{ type: string; value: string }>;
-    console.log(
-      `[GuardClaw] PII extraction found ${items.length} items: ${items.map((i) => `${i.type}=${i.value}`).join(", ")}`,
-    );
     return items;
   } catch {
     console.error("[GuardClaw] Failed to parse PII extraction JSON:", jsonStr.slice(0, 300));
@@ -700,55 +748,4 @@ function parseModelResponse(response: string): {
       confidence: 0,
     };
   }
-}
-
-/**
- * Raw edge model call for internal GuardClaw use only (detection, PII extraction,
- * desensitization, token-saver). S3 content routing uses providerOverride instead.
- *
- * Not part of the public plugin API — OpenClaw Plugin SDK has no native model
- * completion API yet. If upstream adds PluginRuntime.models.chatComplete(),
- * this helper should migrate to that.
- */
-export async function _callEdgeModelRaw(
-  systemPrompt: string,
-  userMessage: string,
-  config: {
-    endpoint?: string;
-    model?: string;
-    apiKey?: string;
-    providerType?: EdgeProviderType;
-    customModule?: string;
-  },
-): Promise<string> {
-  const endpoint = config.endpoint ?? "http://localhost:11434";
-  const model = config.model ?? "openbmb/minicpm4.1";
-
-  const completion = await callChatCompletion(
-    endpoint,
-    model,
-    [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userMessage },
-    ],
-    {
-      temperature: 0.3,
-      maxTokens: 1500,
-      frequencyPenalty: 0.5,
-      stop: ["[message_id:", "[Message_id:", "[system:", "Instructions:", "Data:"],
-      apiKey: config.apiKey,
-      providerType: config.providerType,
-      customModule: config.customModule,
-    },
-  );
-
-  let result = completion.text;
-  for (const marker of ["[message_id:", "[Message_id:"]) {
-    const idx = result.indexOf(marker);
-    if (idx > 0) {
-      result = result.slice(0, idx).trim();
-    }
-  }
-
-  return result;
 }

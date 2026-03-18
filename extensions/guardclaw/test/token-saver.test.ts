@@ -156,10 +156,7 @@ describe("Token-Saver Router", () => {
       mockCallChat.mockResolvedValueOnce({ text: '{"tier":"COMPLEX"}' });
 
       const result = await tokenSaverRouter.detect(
-        {
-          ...baseContext,
-          message: "Design a microservices architecture for an e-commerce platform",
-        },
+        { ...baseContext, message: "Design a microservices architecture for an e-commerce platform" },
         baseConfig,
       );
 
@@ -195,7 +192,10 @@ describe("Token-Saver Router", () => {
     it("calls LLM judge for main agent sessions", async () => {
       mockCallChat.mockResolvedValueOnce({ text: '{"tier":"MEDIUM"}' });
 
-      await tokenSaverRouter.detect({ ...baseContext, sessionKey: "main:user:123" }, baseConfig);
+      await tokenSaverRouter.detect(
+        { ...baseContext, sessionKey: "main:user:123" },
+        baseConfig,
+      );
 
       expect(mockCallChat).toHaveBeenCalledTimes(1);
     });
@@ -251,7 +251,10 @@ describe("Token-Saver Router", () => {
       mockCallChat.mockResolvedValueOnce({ text: '{"tier":"SIMPLE"}' });
       const longPrompt = "x".repeat(1000);
 
-      await tokenSaverRouter.detect({ ...baseContext, message: longPrompt }, baseConfig);
+      await tokenSaverRouter.detect(
+        { ...baseContext, message: longPrompt },
+        baseConfig,
+      );
 
       const callArgs = mockCallChat.mock.calls[0];
       const messages = callArgs[2] as Array<{ role: string; content: string }>;

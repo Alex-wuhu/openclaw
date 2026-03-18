@@ -18,10 +18,6 @@ export function setActiveProxy(proxy: ProxyHandle): void {
   activeProxy = proxy;
 }
 
-export function getActiveProxy(): ProxyHandle | null {
-  return activeProxy;
-}
-
 /**
  * Provider plugin definition for the privacy proxy.
  *
@@ -45,9 +41,9 @@ export const guardClawPrivacyProvider = {
  * the user has configured (openai/gpt-4o, anthropic/claude-sonnet, etc.)
  * without needing to know which provider owns the model at registration time.
  */
-export function mirrorAllProviderModels(config: {
-  models?: { providers?: Record<string, { models?: unknown }> };
-}): unknown[] {
+export function mirrorAllProviderModels(
+  config: { models?: { providers?: Record<string, { models?: unknown }> } },
+): unknown[] {
   const seen = new Set<string>();
   const mirrored: unknown[] = [];
   const providers = config.models?.providers ?? {};
@@ -67,12 +63,7 @@ export function mirrorAllProviderModels(config: {
       for (const [modelId, modelDef] of Object.entries(models as Record<string, unknown>)) {
         if (!seen.has(modelId)) {
           seen.add(modelId);
-          mirrored.push({
-            id: modelId,
-            ...(typeof modelDef === "object" && modelDef !== null
-              ? (modelDef as Record<string, unknown>)
-              : {}),
-          });
+          mirrored.push({ id: modelId, ...(typeof modelDef === "object" && modelDef !== null ? modelDef as Record<string, unknown> : {}) });
         }
       }
     }

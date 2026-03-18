@@ -24,7 +24,9 @@ describe("stripPiiMarkers", () => {
   });
 
   it("does not modify messages without markers", () => {
-    const messages = [{ role: "user", content: "What is the weather today?" }];
+    const messages = [
+      { role: "user", content: "What is the weather today?" },
+    ];
 
     const stripped = stripPiiMarkers(messages);
 
@@ -32,7 +34,7 @@ describe("stripPiiMarkers", () => {
     expect(messages[0].content).toBe("What is the weather today?");
   });
 
-  it("only strips from user messages", () => {
+  it("strips from all message roles (system + user)", () => {
     const messages = [
       { role: "system", content: `${GUARDCLAW_S2_OPEN}\ntest\n${GUARDCLAW_S2_CLOSE}\n\noriginal` },
       { role: "user", content: `${GUARDCLAW_S2_OPEN}\nclean\n${GUARDCLAW_S2_CLOSE}\n\ndirty` },
@@ -40,21 +42,15 @@ describe("stripPiiMarkers", () => {
 
     stripPiiMarkers(messages);
 
-    expect(messages[0].content).toContain("original");
+    expect(messages[0].content).toBe("test");
     expect(messages[1].content).toBe("clean");
   });
 
   it("handles multiple user messages — strips from all", () => {
     const messages = [
-      {
-        role: "user",
-        content: `${GUARDCLAW_S2_OPEN}\nfirst clean\n${GUARDCLAW_S2_CLOSE}\n\nfirst dirty`,
-      },
+      { role: "user", content: `${GUARDCLAW_S2_OPEN}\nfirst clean\n${GUARDCLAW_S2_CLOSE}\n\nfirst dirty` },
       { role: "assistant", content: "response" },
-      {
-        role: "user",
-        content: `${GUARDCLAW_S2_OPEN}\nsecond clean\n${GUARDCLAW_S2_CLOSE}\n\nsecond dirty`,
-      },
+      { role: "user", content: `${GUARDCLAW_S2_OPEN}\nsecond clean\n${GUARDCLAW_S2_CLOSE}\n\nsecond dirty` },
     ];
 
     const stripped = stripPiiMarkers(messages);

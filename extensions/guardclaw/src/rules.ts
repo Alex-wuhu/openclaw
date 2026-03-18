@@ -4,27 +4,35 @@
  * Rule-based sensitivity detection for keywords, regex patterns, tool types, and parameters.
  */
 
-import type {
-  DetectionContext,
-  DetectionResult,
-  PrivacyConfig,
-  SensitivityLevel,
-} from "./types.js";
+import type { DetectionContext, DetectionResult, PrivacyConfig, SensitivityLevel } from "./types.js";
 import { levelToNumeric, maxLevel } from "./types.js";
 import { extractPathsFromParams, matchesPathPattern } from "./utils.js";
 
 /** Cache compiled regex patterns to avoid re-compilation on every call */
+const PATTERN_CACHE_MAX = 500;
 const patternCache = new Map<string, RegExp>();
 
 function getOrCompileRegex(pattern: string): RegExp | null {
   const cached = patternCache.get(pattern);
   if (cached) return cached;
   try {
-    const compiled = new RegExp(pattern, "i");
+    // Strip Python-style inline flags (?i), (?s), (?m) etc. — JS uses RegExp flags instead
+    let flags = "i";
+    const cleaned = pattern.replace(/^\(\?([gimsuy]+)\)/, (_m, f: string) => {
+      flags = f.includes("i") ? "i" : "";
+      if (f.includes("s")) flags += "s";
+      if (f.includes("m")) flags += "m";
+      return "";
+    });
+    const compiled = new RegExp(cleaned, flags);
+    if (patternCache.size >= PATTERN_CACHE_MAX) {
+      const firstKey = patternCache.keys().next().value;
+      if (firstKey !== undefined) patternCache.delete(firstKey);
+    }
     patternCache.set(pattern, compiled);
     return compiled;
-  } catch {
-    console.warn(`[GuardClaw] Invalid regex pattern: ${pattern}`);
+  } catch (err) {
+    console.warn(`[GuardClaw] Invalid regex pattern: ${pattern} — ${(err as Error).message}`);
     return null;
   }
 }
@@ -32,7 +40,10 @@ function getOrCompileRegex(pattern: string): RegExp | null {
 /**
  * Detect sensitivity level based on configured rules
  */
-export function detectByRules(context: DetectionContext, config: PrivacyConfig): DetectionResult {
+export function detectByRules(
+  context: DetectionContext,
+  config: PrivacyConfig
+): DetectionResult {
   const levels: SensitivityLevel[] = [];
   const reasons: string[] = [];
 
@@ -82,10 +93,9 @@ export function detectByRules(context: DetectionContext, config: PrivacyConfig):
 
   // 5. Check tool result content (keywords + patterns)
   if (context.toolResult) {
-    const resultText =
-      typeof context.toolResult === "string"
-        ? context.toolResult
-        : JSON.stringify(context.toolResult);
+    const resultText = typeof context.toolResult === "string"
+      ? context.toolResult
+      : JSON.stringify(context.toolResult);
     const resultKeywordLevel = checkKeywords(resultText, config);
     if (resultKeywordLevel.level !== "S1") {
       levels.push(resultKeywordLevel.level);
@@ -116,19 +126,45 @@ export function detectByRules(context: DetectionContext, config: PrivacyConfig):
 }
 
 /**
+ * Build a keyword-aware regex that matches the keyword at word-like boundaries.
+ *
+ * For keywords starting with "." (file extensions like ".env", ".key"):
+ *   The "." itself is a boundary, so only check that the tail is NOT followed
+ *   by an alphanumeric char.  "file.env" matches, ".envelope" does not.
+ *
+ * For plain-word keywords:
+ *   Negative lookbehind/lookahead on alphanumeric chars so "token" matches
+ *   "auth_token" and "the token" but NOT "tokenize".
+ */
+const keywordRegexCache = new Map<string, RegExp>();
+
+export function getKeywordRegex(keyword: string): RegExp {
+  const cached = keywordRegexCache.get(keyword);
+  if (cached) return cached;
+
+  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  let pattern: string;
+  if (keyword.startsWith(".")) {
+    pattern = `${escaped}(?![a-zA-Z0-9])`;
+  } else {
+    pattern = `(?<![a-zA-Z0-9])${escaped}(?![a-zA-Z0-9])`;
+  }
+  const re = new RegExp(pattern, "i");
+  keywordRegexCache.set(keyword, re);
+  return re;
+}
+
+/**
  * Check for sensitive keywords in text
  */
 function checkKeywords(
   text: string,
-  config: PrivacyConfig,
+  config: PrivacyConfig
 ): { level: SensitivityLevel; reason?: string } {
-  const lowerText = text.toLowerCase();
-
   // Check S3 keywords first (higher priority)
   const s3Keywords = config.rules?.keywords?.S3 ?? [];
   for (const keyword of s3Keywords) {
-    const pattern = keyword.toLowerCase();
-    if (lowerText.includes(pattern)) {
+    if (getKeywordRegex(keyword).test(text)) {
       return {
         level: "S3",
         reason: `S3 keyword detected: ${keyword}`,
@@ -139,8 +175,7 @@ function checkKeywords(
   // Check S2 keywords
   const s2Keywords = config.rules?.keywords?.S2 ?? [];
   for (const keyword of s2Keywords) {
-    const pattern = keyword.toLowerCase();
-    if (lowerText.includes(pattern)) {
+    if (getKeywordRegex(keyword).test(text)) {
       return {
         level: "S2",
         reason: `S2 keyword detected: ${keyword}`,
@@ -156,7 +191,7 @@ function checkKeywords(
  */
 function checkPatterns(
   text: string,
-  config: PrivacyConfig,
+  config: PrivacyConfig
 ): { level: SensitivityLevel; reason?: string } {
   // Check S3 patterns first (higher priority)
   const s3Patterns = config.rules?.patterns?.S3 ?? [];
@@ -186,11 +221,22 @@ function checkPatterns(
 }
 
 /**
+ * Check if `name` contains `segment` as a whole word delimited by common
+ * tool-name separators (`.`, `_`, `-`) or string boundaries.
+ * Prevents "pseudocode_generator" matching "sudo", "powershell" matching "shell", etc.
+ */
+function toolNameContainsSegment(name: string, segment: string): boolean {
+  const escaped = segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`(?:^|[._\\-])${escaped}(?:$|[._\\-])`, "i");
+  return re.test(name);
+}
+
+/**
  * Check tool type against configured sensitive tools
  */
 function checkToolType(
   toolName: string,
-  config: PrivacyConfig,
+  config: PrivacyConfig
 ): { level: SensitivityLevel; reason?: string } {
   const normalizedTool = toolName.toLowerCase();
 
@@ -198,7 +244,7 @@ function checkToolType(
   const s3Tools = config.rules?.tools?.S3?.tools ?? [];
   for (const tool of s3Tools) {
     const pattern = tool.toLowerCase();
-    if (normalizedTool === pattern || normalizedTool.includes(pattern)) {
+    if (normalizedTool === pattern || toolNameContainsSegment(normalizedTool, pattern)) {
       return {
         level: "S3",
         reason: `S3 tool detected: ${toolName}`,
@@ -210,7 +256,7 @@ function checkToolType(
   const s2Tools = config.rules?.tools?.S2?.tools ?? [];
   for (const tool of s2Tools) {
     const pattern = tool.toLowerCase();
-    if (normalizedTool === pattern || normalizedTool.includes(pattern)) {
+    if (normalizedTool === pattern || toolNameContainsSegment(normalizedTool, pattern)) {
       return {
         level: "S2",
         reason: `S2 tool detected: ${toolName}`,
@@ -226,7 +272,7 @@ function checkToolType(
  */
 function checkToolParams(
   params: Record<string, unknown>,
-  config: PrivacyConfig,
+  config: PrivacyConfig
 ): { level: SensitivityLevel; reason?: string } {
   const paths = extractPathsFromParams(params);
 

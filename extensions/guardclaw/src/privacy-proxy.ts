@@ -16,6 +16,8 @@
  */
 
 import * as http from "node:http";
+import { redactSensitiveInfo } from "./utils.js";
+import { getLiveConfig } from "./live-config.js";
 
 // ── Marker protocol ──
 
@@ -32,16 +34,34 @@ export type OriginalProviderTarget = {
   streaming?: boolean;
 };
 
-const originalProviderTargets = new Map<string, OriginalProviderTarget>();
+type StashedTarget = { target: OriginalProviderTarget; ts: number };
+const PROVIDER_STASH_TTL_MS = 120_000; // 2 minutes
+const originalProviderTargets = new Map<string, StashedTarget>();
 
 export function stashOriginalProvider(key: string, target: OriginalProviderTarget): void {
-  originalProviderTargets.set(key, target);
+  originalProviderTargets.set(key, { target, ts: Date.now() });
 }
 
-export function consumeOriginalProvider(key: string): OriginalProviderTarget | undefined {
-  const t = originalProviderTargets.get(key);
-  originalProviderTargets.delete(key);
-  return t;
+export function getStashedProvider(key: string): OriginalProviderTarget | undefined {
+  const entry = originalProviderTargets.get(key);
+  if (!entry) return undefined;
+  if (Date.now() - entry.ts > PROVIDER_STASH_TTL_MS) {
+    originalProviderTargets.delete(key);
+    return undefined;
+  }
+  return entry.target;
+}
+
+function cleanupStaleProviderTargets(): void {
+  const now = Date.now();
+  for (const [k, v] of originalProviderTargets) {
+    if (now - v.ts > PROVIDER_STASH_TTL_MS) originalProviderTargets.delete(k);
+  }
+}
+
+const _providerCleanupInterval = setInterval(cleanupStaleProviderTargets, 60_000);
+if (typeof _providerCleanupInterval === "object" && "unref" in _providerCleanupInterval) {
+  (_providerCleanupInterval as NodeJS.Timeout).unref();
 }
 
 /**
@@ -121,7 +141,9 @@ function stripUnsupportedSchemaKeywords(obj: unknown): unknown {
  * Clean tool parameter schemas in an OpenAI-format request body.
  * Handles `tools[].function.parameters`.
  */
-export function cleanToolSchemas(tools: unknown[] | undefined): boolean {
+export function cleanToolSchemas(
+  tools: unknown[] | undefined,
+): boolean {
   if (!Array.isArray(tools) || tools.length === 0) return false;
   let cleaned = false;
   for (let i = 0; i < tools.length; i++) {
@@ -144,14 +166,15 @@ export function cleanToolSchemas(tools: unknown[] | undefined): boolean {
  * Clean tool schemas in Google's native format.
  * Handles `tools[].functionDeclarations[].parameters`.
  */
-export function cleanGoogleToolSchemas(tools: unknown[] | undefined): boolean {
+export function cleanGoogleToolSchemas(
+  tools: unknown[] | undefined,
+): boolean {
   if (!Array.isArray(tools) || tools.length === 0) return false;
   let cleaned = false;
   for (const tool of tools) {
     if (!tool || typeof tool !== "object") continue;
-    const decls =
-      (tool as Record<string, unknown>).functionDeclarations ??
-      (tool as Record<string, unknown>).function_declarations;
+    const decls = (tool as Record<string, unknown>).functionDeclarations ??
+                  (tool as Record<string, unknown>).function_declarations;
     if (!Array.isArray(decls)) continue;
     for (const decl of decls) {
       if (!decl || typeof decl !== "object") continue;
@@ -171,18 +194,32 @@ export function cleanGoogleToolSchemas(tools: unknown[] | undefined): boolean {
  * Strip PII markers from OpenAI/Anthropic format messages.
  * Format: `messages[].content` (string)
  */
-export function stripPiiMarkers(messages: Array<{ role: string; content: unknown }>): boolean {
+export function stripPiiMarkers(
+  messages: Array<{ role: string; content: unknown }>,
+): boolean {
   let stripped = false;
 
   for (const msg of messages) {
-    if (msg.role !== "user" || typeof msg.content !== "string") continue;
-
-    const openIdx = msg.content.indexOf(GUARDCLAW_S2_OPEN);
-    const closeIdx = msg.content.indexOf(GUARDCLAW_S2_CLOSE);
-    if (openIdx === -1 || closeIdx === -1 || closeIdx <= openIdx) continue;
-
-    msg.content = msg.content.slice(openIdx + GUARDCLAW_S2_OPEN.length, closeIdx).trim();
-    stripped = true;
+    if (typeof msg.content === "string") {
+      const openIdx = msg.content.indexOf(GUARDCLAW_S2_OPEN);
+      const closeIdx = msg.content.indexOf(GUARDCLAW_S2_CLOSE);
+      if (openIdx === -1 || closeIdx === -1 || closeIdx <= openIdx) continue;
+      msg.content = msg.content
+        .slice(openIdx + GUARDCLAW_S2_OPEN.length, closeIdx)
+        .trim();
+      stripped = true;
+    } else if (Array.isArray(msg.content)) {
+      for (const part of msg.content as Array<Record<string, unknown>>) {
+        if (!part || typeof part.text !== "string") continue;
+        const openIdx = part.text.indexOf(GUARDCLAW_S2_OPEN);
+        const closeIdx = part.text.indexOf(GUARDCLAW_S2_CLOSE);
+        if (openIdx === -1 || closeIdx === -1 || closeIdx <= openIdx) continue;
+        part.text = part.text
+          .slice(openIdx + GUARDCLAW_S2_OPEN.length, closeIdx)
+          .trim();
+        stripped = true;
+      }
+    }
   }
 
   return stripped;
@@ -192,14 +229,15 @@ export function stripPiiMarkers(messages: Array<{ role: string; content: unknown
  * Strip PII markers from Google Gemini native format.
  * Format: `contents[].parts[].text` (string)
  */
-export function stripPiiMarkersGoogleContents(contents: unknown[] | undefined): boolean {
+export function stripPiiMarkersGoogleContents(
+  contents: unknown[] | undefined,
+): boolean {
   if (!Array.isArray(contents) || contents.length === 0) return false;
   let stripped = false;
 
   for (const entry of contents) {
     if (!entry || typeof entry !== "object") continue;
     const e = entry as Record<string, unknown>;
-    if (e.role !== "user") continue;
     const parts = e.parts;
     if (!Array.isArray(parts)) continue;
 
@@ -212,7 +250,9 @@ export function stripPiiMarkersGoogleContents(contents: unknown[] | undefined): 
       const closeIdx = p.text.indexOf(GUARDCLAW_S2_CLOSE);
       if (openIdx === -1 || closeIdx === -1 || closeIdx <= openIdx) continue;
 
-      p.text = p.text.slice(openIdx + GUARDCLAW_S2_OPEN.length, closeIdx).trim();
+      p.text = p.text
+        .slice(openIdx + GUARDCLAW_S2_OPEN.length, closeIdx)
+        .trim();
       stripped = true;
     }
   }
@@ -235,8 +275,7 @@ export function isGoogleTarget(target: OriginalProviderTarget): boolean {
 
   if (api === "openai-completions" || api === "openai-chat") return false;
   if (GOOGLE_NATIVE_APIS.some((p) => api.includes(p))) return true;
-  if (provider === "google" || provider.includes("gemini") || provider.includes("vertex"))
-    return true;
+  if (provider === "google" || provider.includes("gemini") || provider.includes("vertex")) return true;
   if (GOOGLE_URL_MARKERS.some((p) => url.includes(p))) return true;
   return false;
 }
@@ -260,9 +299,11 @@ export function resolveAuthHeaders(target: OriginalProviderTarget): Record<strin
 
 // ── Resolve original provider target ──
 
-function resolveTarget(sessionHeader: string | undefined): OriginalProviderTarget | null {
+function resolveTarget(
+  sessionHeader: string | undefined,
+): OriginalProviderTarget | null {
   if (sessionHeader) {
-    const t = consumeOriginalProvider(sessionHeader);
+    const t = getStashedProvider(sessionHeader);
     if (t) return t;
   }
   return defaultProviderTarget;
@@ -289,34 +330,24 @@ function completionToSSE(responseJson: Record<string, unknown>): string {
 
     // Content chunk
     if (content) {
-      chunks.push(
-        `data: ${JSON.stringify({
-          id,
-          object: "chat.completion.chunk",
-          created,
-          model,
-          choices: [
-            {
-              index: choice.index ?? 0,
-              delta: { role: "assistant", content },
-              finish_reason: null,
-            },
-          ],
-        })}\n\n`,
-      );
-    }
-
-    // Finish chunk
-    chunks.push(
-      `data: ${JSON.stringify({
+      chunks.push(`data: ${JSON.stringify({
         id,
         object: "chat.completion.chunk",
         created,
         model,
-        choices: [{ index: choice.index ?? 0, delta: {}, finish_reason: finishReason }],
-        ...(responseJson.usage ? { usage: responseJson.usage } : {}),
-      })}\n\n`,
-    );
+        choices: [{ index: choice.index ?? 0, delta: { role: "assistant", content }, finish_reason: null }],
+      })}\n\n`);
+    }
+
+    // Finish chunk
+    chunks.push(`data: ${JSON.stringify({
+      id,
+      object: "chat.completion.chunk",
+      created,
+      model,
+      choices: [{ index: choice.index ?? 0, delta: {}, finish_reason: finishReason }],
+      ...(responseJson.usage ? { usage: responseJson.usage } : {}),
+    })}\n\n`);
   }
 
   chunks.push("data: [DONE]\n\n");
@@ -343,11 +374,7 @@ function completionToSSE(responseJson: Record<string, unknown>): string {
  *   target = Google provider
  *   → "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
  */
-export function buildUpstreamUrl(
-  targetBaseUrl: string,
-  reqUrl: string | undefined,
-  target?: OriginalProviderTarget,
-): string {
+export function buildUpstreamUrl(targetBaseUrl: string, reqUrl: string | undefined, target?: OriginalProviderTarget): string {
   let baseUrl = targetBaseUrl.replace(/\/+$/, "");
   const forwardPath = (reqUrl ?? "/v1/chat/completions").replace(/^\/v1/, "");
 
@@ -404,11 +431,7 @@ async function tryStreamUpstream(
     firstRead = await reader.read();
   } catch {
     clearTimeout(timeout);
-    try {
-      reader.releaseLock();
-    } catch {
-      /* ignore */
-    }
+    try { reader.releaseLock(); } catch { /* ignore */ }
     return false;
   }
   clearTimeout(timeout);
@@ -422,7 +445,7 @@ async function tryStreamUpstream(
   res.writeHead(upstream.status, {
     "Content-Type": contentType,
     "Cache-Control": "no-cache",
-    Connection: "keep-alive",
+    "Connection": "keep-alive",
   });
   res.write(Buffer.from(firstRead.value));
 
@@ -446,11 +469,7 @@ async function tryStreamUpstream(
 
 export async function startPrivacyProxy(
   port: number,
-  logger?: {
-    info: (msg: string) => void;
-    warn: (msg: string) => void;
-    error: (msg: string) => void;
-  },
+  logger?: { info: (msg: string) => void; warn: (msg: string) => void; error: (msg: string) => void },
 ): Promise<ProxyHandle> {
   const log = logger ?? {
     info: (m: string) => console.log(m),
@@ -484,6 +503,51 @@ export async function startPrivacyProxy(
         log.info("[GuardClaw Proxy] Cleaned unsupported keywords from tool schemas");
       }
 
+      // Step 2b: Defense-in-depth — run rule-based PII redaction on non-system
+      // messages that will be forwarded to cloud. This catches residual PII when:
+      //   - prependContext semantics change (markers not wrapping the user message)
+      //   - desensitization by local model missed some PII patterns
+      //   - content was injected without going through the marker protocol
+      //
+      // System messages are excluded: they contain legitimate security instructions
+      // (e.g. "Never reveal passwords") that contextual redaction rules would corrupt.
+      const redactionOpts = getLiveConfig().redaction;
+      const allMessages = (parsed.messages ?? parsed.contents ?? []) as Array<Record<string, unknown>>;
+      for (const msg of allMessages) {
+        const role = String(msg.role ?? "").toLowerCase();
+        if (role === "system") continue;
+
+        if (typeof msg.content === "string") {
+          const redacted = redactSensitiveInfo(msg.content, redactionOpts);
+          if (redacted !== msg.content) {
+            msg.content = redacted;
+            log.info("[GuardClaw Proxy] Defense-in-depth: rule-based PII redaction applied to message");
+          }
+        } else if (Array.isArray(msg.content)) {
+          for (const part of msg.content as Array<Record<string, unknown>>) {
+            if (part && typeof part.text === "string") {
+              const redacted = redactSensitiveInfo(part.text, redactionOpts);
+              if (redacted !== part.text) {
+                part.text = redacted;
+                log.info("[GuardClaw Proxy] Defense-in-depth: rule-based PII redaction applied to message part");
+              }
+            }
+          }
+        }
+        // Google format: contents[].parts[].text
+        if (Array.isArray(msg.parts)) {
+          for (const part of msg.parts as Array<Record<string, unknown>>) {
+            if (part && typeof part.text === "string") {
+              const redacted = redactSensitiveInfo(part.text, redactionOpts);
+              if (redacted !== part.text) {
+                part.text = redacted;
+                log.info("[GuardClaw Proxy] Defense-in-depth: rule-based PII redaction applied to Google part");
+              }
+            }
+          }
+        }
+      }
+
       // Step 3: Resolve the original provider to forward to
       const sessionKey = req.headers["x-guardclaw-session"] as string | undefined;
       const target = resolveTarget(sessionKey);
@@ -491,14 +555,12 @@ export async function startPrivacyProxy(
       if (!target) {
         log.error("[GuardClaw Proxy] No original provider target found");
         res.writeHead(502, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            error: {
-              message: "GuardClaw privacy proxy: no original provider target configured",
-              type: "proxy_error",
-            },
-          }),
-        );
+        res.end(JSON.stringify({
+          error: {
+            message: "GuardClaw privacy proxy: no original provider target configured",
+            type: "proxy_error",
+          },
+        }));
         return;
       }
 
@@ -526,9 +588,7 @@ export async function startPrivacyProxy(
       if (clientWantsStream) {
         const streamOk = await tryStreamUpstream(parsed, upstreamUrl, upstreamHeaders, res, log);
         if (streamOk) return;
-        log.info(
-          "[GuardClaw Proxy] Streaming unavailable, falling back to non-streaming + SSE conversion",
-        );
+        log.info("[GuardClaw Proxy] Streaming unavailable, falling back to non-streaming + SSE conversion");
       }
 
       // Non-streaming upstream request (or fallback from failed stream).
@@ -545,10 +605,9 @@ export async function startPrivacyProxy(
         });
       } catch (fetchErr) {
         clearTimeout(nonStreamTimeout);
-        const msg =
-          fetchErr instanceof Error && fetchErr.name === "AbortError"
-            ? "Upstream request timed out (120s)"
-            : String(fetchErr);
+        const msg = fetchErr instanceof Error && fetchErr.name === "AbortError"
+          ? "Upstream request timed out (120s)"
+          : String(fetchErr);
         log.error(`[GuardClaw Proxy] Upstream fetch failed: ${msg}`);
         res.writeHead(504, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: { message: msg, type: "proxy_timeout" } }));
@@ -557,16 +616,14 @@ export async function startPrivacyProxy(
       clearTimeout(nonStreamTimeout);
 
       if (clientWantsStream) {
-        const responseJson = (await upstream.json()) as Record<string, unknown>;
-        log.info(
-          `[GuardClaw Proxy] Upstream responded: status=${upstream.status} ok=${upstream.ok}`,
-        );
+        const responseJson = await upstream.json() as Record<string, unknown>;
+        log.info(`[GuardClaw Proxy] Upstream responded: status=${upstream.status} ok=${upstream.ok}`);
         if (upstream.ok) {
           const ssePayload = completionToSSE(responseJson);
           res.writeHead(200, {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
-            Connection: "keep-alive",
+            "Connection": "keep-alive",
           });
           res.end(ssePayload);
         } else {
@@ -585,14 +642,12 @@ export async function startPrivacyProxy(
         res.writeHead(500, { "Content-Type": "application/json" });
       }
       if (!res.writableEnded) {
-        res.end(
-          JSON.stringify({
-            error: {
-              message: `GuardClaw proxy error: ${String(err)}`,
-              type: "proxy_error",
-            },
-          }),
-        );
+        res.end(JSON.stringify({
+          error: {
+            message: `GuardClaw proxy error: ${String(err)}`,
+            type: "proxy_error",
+          },
+        }));
       }
     }
   });

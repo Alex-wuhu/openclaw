@@ -9,14 +9,11 @@
  *   5. Privacy proxy marker stripping
  */
 
-import * as fs from "node:fs";
-import * as path from "node:path";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { detectSensitivityLevel } from "../src/detector.js";
-import { stripPiiMarkers, GUARDCLAW_S2_OPEN, GUARDCLAW_S2_CLOSE } from "../src/privacy-proxy.js";
 import { RouterPipeline } from "../src/router-pipeline.js";
 import { privacyRouter } from "../src/routers/privacy.js";
-import { DualSessionManager } from "../src/session-manager.js";
+import { stripPiiMarkers, GUARDCLAW_S2_OPEN, GUARDCLAW_S2_CLOSE } from "../src/privacy-proxy.js";
 import {
   markSessionAsPrivate,
   isSessionMarkedPrivate,
@@ -27,8 +24,11 @@ import {
   getPendingDetection,
   consumeDetection,
 } from "../src/session-state.js";
-import type { DetectionContext, GuardClawRouter } from "../src/types.js";
+import { DualSessionManager } from "../src/session-manager.js";
 import { redactSensitiveInfo } from "../src/utils.js";
+import type { DetectionContext, GuardClawRouter } from "../src/types.js";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 const ruleOnlyConfig = {
   privacy: {
@@ -134,12 +134,7 @@ describe("GuardClaw Plugin E2E", () => {
 
       const d2 = await pipeline.run(
         "onToolCallProposed",
-        {
-          checkpoint: "onToolCallProposed",
-          toolName: "system.run",
-          toolParams: { command: "ls" },
-          sessionKey,
-        },
+        { checkpoint: "onToolCallProposed", toolName: "system.run", toolParams: { command: "ls" }, sessionKey },
         ruleOnlyConfig,
       );
       expect(d2.level).toBe("S3");
@@ -248,22 +243,14 @@ describe("GuardClaw Plugin E2E", () => {
     it("guard agent messages excluded from cloud-visible history", async () => {
       const sk = "e2e-dual-history";
 
-      await manager.persistMessage(sk, {
-        role: "user",
-        content: "check my salary",
-        timestamp: Date.now(),
-      });
+      await manager.persistMessage(sk, { role: "user", content: "check my salary", timestamp: Date.now() });
       await manager.persistMessage(sk, {
         role: "assistant",
         content: "[Guard Agent] Processing private data",
         sessionKey: "main:guard:1",
         timestamp: Date.now(),
       });
-      await manager.persistMessage(sk, {
-        role: "assistant",
-        content: "Your compensation looks correct.",
-        timestamp: Date.now(),
-      });
+      await manager.persistMessage(sk, { role: "assistant", content: "Your compensation looks correct.", timestamp: Date.now() });
 
       const full = await manager.loadHistory(sk, false);
       const clean = await manager.loadHistory(sk, true);
@@ -283,7 +270,8 @@ describe("GuardClaw Plugin E2E", () => {
         "Phone: 13912345678",
       ].join("\n");
 
-      const redacted = redactSensitiveInfo(input);
+      const opts = { email: true, internalIp: true, chinesePhone: true };
+      const redacted = redactSensitiveInfo(input, opts);
 
       expect(redacted).toContain("[REDACTED:PRIVATE_KEY]");
       expect(redacted).toContain("[REDACTED:EMAIL]");

@@ -11,10 +11,6 @@
  * coexist with user-defined routers (cost, content-filter, etc.).
  */
 
-import { defaultPrivacyConfig } from "../config-schema.js";
-import { detectSensitivityLevel } from "../detector.js";
-import { getGuardAgentConfig } from "../guard-agent.js";
-import { desensitizeWithLocalModel } from "../local-model.js";
 import type {
   DetectionContext,
   GuardClawRouter,
@@ -22,6 +18,10 @@ import type {
   RouterDecision,
   SensitivityLevel,
 } from "../types.js";
+import { detectSensitivityLevel } from "../detector.js";
+import { desensitizeWithLocalModel } from "../local-model.js";
+import { getGuardAgentConfig } from "../guard-agent.js";
+import { defaultPrivacyConfig } from "../config-schema.js";
 
 /**
  * Map a DetectionResult (from detector.ts) into a RouterDecision.
@@ -108,7 +108,7 @@ export const privacyRouter: GuardClawRouter = {
       return { level: "S1", action: "passthrough", reason: "Privacy detection disabled" };
     }
 
-    const result = await detectSensitivityLevel(context, pluginConfig);
+    const result = await detectSensitivityLevel(context, pluginConfig, privacyConfig);
 
     return detectionToDecision(result.level, result.reason, privacyConfig);
   },

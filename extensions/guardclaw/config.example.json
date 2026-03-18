@@ -23,7 +23,10 @@
           "(?:mysql|postgres|mongodb|redis)://[^\\s]+",
           "\\b(?:sk|key|token)-[A-Za-z0-9]{16,}\\b"
         ],
-        "S3": ["-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----", "AKIA[0-9A-Z]{16}"]
+        "S3": [
+          "-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+          "AKIA[0-9A-Z]{16}"
+        ]
       },
       "tools": {
         "S2": {
@@ -122,7 +125,9 @@
     "localProviders": [],
     "session": {
       "isolateGuardHistory": true,
-      "baseDir": "~/.openclaw"
+      "baseDir": "~/.openclaw",
+      "injectDualHistory": true,
+      "historyLimit": 20
     }
   }
 }

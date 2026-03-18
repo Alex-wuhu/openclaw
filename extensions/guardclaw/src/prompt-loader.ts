@@ -21,8 +21,8 @@ const __dirname = dirname(__filename);
  */
 function resolvePromptsDir(): string {
   const candidates = [
-    resolve(__dirname, "../prompts"), // from src/  → prompts/
-    resolve(__dirname, "../../prompts"), // from dist/src/ → prompts/
+    resolve(__dirname, "../prompts"),     // from src/  → prompts/
+    resolve(__dirname, "../../prompts"),  // from dist/src/ → prompts/
   ];
   for (const dir of candidates) {
     if (existsSync(dir)) return dir;
@@ -31,8 +31,6 @@ function resolvePromptsDir(): string {
 }
 
 const PROMPTS_DIR = resolvePromptsDir();
-
-export { PROMPTS_DIR };
 
 /** Cache loaded prompts in memory — invalidated on dashboard save */
 const cache = new Map<string, string>();
@@ -86,11 +84,6 @@ export function invalidatePrompt(name: string): void {
   cache.delete(name);
 }
 
-/** Invalidate all cached prompts. */
-export function invalidateAllPrompts(): void {
-  cache.clear();
-}
-
 /**
  * Write a prompt to `prompts/{name}.md` and invalidate its cache.
  * Creates the prompts directory if it doesn't exist.
@@ -112,8 +105,6 @@ export function readPromptFromDisk(name: string): string | null {
     if (existsSync(filePath)) {
       return readFileSync(filePath, "utf-8").trim();
     }
-  } catch {
-    /* file unreadable */
-  }
+  } catch { /* file unreadable */ }
   return null;
 }

@@ -6,7 +6,6 @@ COMPLEX = system design, multi-file refactoring, architecture decisions, large c
 REASONING = math proof, formal logic, step-by-step derivation, deep analysis with constraints, algorithm correctness proof, research gap identification, experiment design, patent design-around strategy, multi-paper synthesis with novel hypothesis, reading a document then answering MULTIPLE specific extraction questions (5+), structured information extraction requiring careful reading comprehension
 
 Rules:
-
 - When unsure, pick the LOWER tier (save tokens).
 - Short prompts (< 20 words) asking "what is X" or "explain X" → SIMPLE.
 - Summarizing or reviewing a single piece of content → MEDIUM.

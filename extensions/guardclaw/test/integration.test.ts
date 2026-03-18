@@ -146,7 +146,7 @@ describe("GuardClaw Integration", () => {
         sessionKey,
         messageResult.level,
         messageContext.checkpoint,
-        messageResult.reason,
+        messageResult.reason
       );
 
       // Checkpoint 2: onToolCallProposed
@@ -178,7 +178,7 @@ describe("GuardClaw Integration", () => {
         sessionKey,
         executedResult.level,
         resultContext.checkpoint,
-        executedResult.reason,
+        executedResult.reason
       );
 
       // Verify final state
@@ -206,7 +206,7 @@ describe("GuardClaw Integration", () => {
     });
 
     test("should handle empty configuration gracefully", async () => {
-      const emptyConfig = {};
+      const emptyConfig = { privacy: { localModel: { enabled: false } } };
 
       const context: DetectionContext = {
         checkpoint: "onUserMessage",

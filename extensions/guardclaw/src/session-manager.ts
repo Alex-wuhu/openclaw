@@ -22,6 +22,18 @@ export type SessionMessage = {
  */
 export class DualSessionManager {
   private baseDir: string;
+  private writeLocks = new Map<string, Promise<void>>();
+
+  /**
+   * Serialize writes to the same file to prevent interleaved JSONL lines
+   * when multiple fire-and-forget writes race from sync hooks.
+   */
+  private async withWriteLock(lockKey: string, fn: () => Promise<void>): Promise<void> {
+    const prev = this.writeLocks.get(lockKey) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    this.writeLocks.set(lockKey, next);
+    await next;
+  }
 
   constructor(baseDir: string = "~/.openclaw") {
     // Expand ~ to home directory
@@ -38,7 +50,7 @@ export class DualSessionManager {
   async persistMessage(
     sessionKey: string,
     message: SessionMessage,
-    agentId: string = "main",
+    agentId: string = "main"
   ): Promise<void> {
     // Always write to full history
     await this.writeToHistory(sessionKey, message, agentId, "full");
@@ -50,13 +62,54 @@ export class DualSessionManager {
   }
 
   /**
+   * Seed the full track with existing clean track content (if any) so that
+   * the full track is a complete history from the start of the session.
+   * No-op if the full track already exists.  Mirrors the memory-isolation
+   * pattern of mergeCleanIntoFull.
+   */
+  private seededSessions = new Set<string>();
+
+  private async ensureFullTrackSeeded(
+    sessionKey: string,
+    agentId: string,
+  ): Promise<void> {
+    const key = `${sessionKey}:${agentId}`;
+    if (this.seededSessions.has(key)) return;
+
+    const fullPath = this.getHistoryPath(sessionKey, agentId, "full");
+    if (fs.existsSync(fullPath)) {
+      this.seededSessions.add(key);
+      return;
+    }
+
+    const cleanPath = this.getHistoryPath(sessionKey, agentId, "clean");
+    if (!fs.existsSync(cleanPath)) {
+      this.seededSessions.add(key);
+      return;
+    }
+
+    try {
+      const dir = path.dirname(fullPath);
+      await fs.promises.mkdir(dir, { recursive: true });
+      await fs.promises.copyFile(cleanPath, fullPath);
+      console.log(`[GuardClaw] Seeded full track from clean track for ${sessionKey}`);
+    } catch (err) {
+      console.error(`[GuardClaw] Failed to seed full track for ${sessionKey}:`, err);
+    }
+    this.seededSessions.add(key);
+  }
+
+  /**
    * Write a message to the full history only.
+   * On first write, seeds the full track with existing clean track content
+   * so it contains the complete conversation history.
    */
   async writeToFull(
     sessionKey: string,
     message: SessionMessage,
-    agentId: string = "main",
+    agentId: string = "main"
   ): Promise<void> {
+    await this.ensureFullTrackSeeded(sessionKey, agentId);
     await this.writeToHistory(sessionKey, message, agentId, "full");
   }
 
@@ -66,7 +119,7 @@ export class DualSessionManager {
   async writeToClean(
     sessionKey: string,
     message: SessionMessage,
-    agentId: string = "main",
+    agentId: string = "main"
   ): Promise<void> {
     await this.writeToHistory(sessionKey, message, agentId, "clean");
   }
@@ -80,7 +133,7 @@ export class DualSessionManager {
     sessionKey: string,
     isCloudModel: boolean,
     agentId: string = "main",
-    limit?: number,
+    limit?: number
   ): Promise<SessionMessage[]> {
     const historyType = isCloudModel ? "clean" : "full";
     return await this.readHistory(sessionKey, agentId, historyType, limit);
@@ -90,17 +143,14 @@ export class DualSessionManager {
    * Check if a message is from guard agent interactions
    */
   private isGuardAgentMessage(message: SessionMessage): boolean {
-    // Check if the message is part of a guard agent session
     if (message.sessionKey && isGuardSessionKey(message.sessionKey)) {
       return true;
     }
 
-    // Check if the message content mentions guard agent
-    const content = message.content.toLowerCase();
+    const content = message.content;
     if (
-      content.includes("[guard agent]") ||
-      content.includes("guard:") ||
-      content.includes(":guard:")
+      content.includes("[guardclaw:guard]") ||
+      content.includes("[guard agent]")
     ) {
       return true;
     }
@@ -109,34 +159,36 @@ export class DualSessionManager {
   }
 
   /**
-   * Write message to history file
+   * Write message to history file.
+   * Uses a per-file write lock to serialize concurrent appends
+   * (e.g. from fire-and-forget calls in sync hooks).
    */
   private async writeToHistory(
     sessionKey: string,
     message: SessionMessage,
     agentId: string,
-    historyType: "full" | "clean",
+    historyType: "full" | "clean"
   ): Promise<void> {
-    try {
-      const historyPath = this.getHistoryPath(sessionKey, agentId, historyType);
+    const historyPath = this.getHistoryPath(sessionKey, agentId, historyType);
 
-      // Ensure directory exists
-      const dir = path.dirname(historyPath);
-      await fs.promises.mkdir(dir, { recursive: true });
+    await this.withWriteLock(historyPath, async () => {
+      try {
+        const dir = path.dirname(historyPath);
+        await fs.promises.mkdir(dir, { recursive: true });
 
-      // Append message as JSONL
-      const line = JSON.stringify({
-        ...message,
-        timestamp: message.timestamp ?? Date.now(),
-      });
+        const line = JSON.stringify({
+          ...message,
+          timestamp: message.timestamp ?? Date.now(),
+        });
 
-      await fs.promises.appendFile(historyPath, line + "\n", "utf-8");
-    } catch (err) {
-      console.error(
-        `[GuardClaw] Failed to write to ${historyType} history for ${sessionKey}:`,
-        err,
-      );
-    }
+        await fs.promises.appendFile(historyPath, line + "\n", "utf-8");
+      } catch (err) {
+        console.error(
+          `[GuardClaw] Failed to write to ${historyType} history for ${sessionKey}:`,
+          err
+        );
+      }
+    });
   }
 
   /**
@@ -146,7 +198,7 @@ export class DualSessionManager {
     sessionKey: string,
     agentId: string,
     historyType: "full" | "clean",
-    limit?: number,
+    limit?: number
   ): Promise<SessionMessage[]> {
     try {
       const historyPath = this.getHistoryPath(sessionKey, agentId, historyType);
@@ -177,7 +229,10 @@ export class DualSessionManager {
 
       return messages;
     } catch (err) {
-      console.error(`[GuardClaw] Failed to read ${historyType} history for ${sessionKey}:`, err);
+      console.error(
+        `[GuardClaw] Failed to read ${historyType} history for ${sessionKey}:`,
+        err
+      );
       return [];
     }
   }
@@ -188,14 +243,21 @@ export class DualSessionManager {
   private getHistoryPath(
     sessionKey: string,
     agentId: string,
-    historyType: "full" | "clean",
+    historyType: "full" | "clean"
   ): string {
     // Sanitize session key for file name
     const safeSessionKey = sessionKey.replace(/[^a-zA-Z0-9_-]/g, "_");
 
     const fileName = `${safeSessionKey}.jsonl`;
 
-    return path.join(this.baseDir, "agents", agentId, "sessions", historyType, fileName);
+    return path.join(
+      this.baseDir,
+      "agents",
+      agentId,
+      "sessions",
+      historyType,
+      fileName
+    );
   }
 
   /**
@@ -204,7 +266,7 @@ export class DualSessionManager {
   async clearHistory(
     sessionKey: string,
     agentId: string = "main",
-    historyType?: "full" | "clean",
+    historyType?: "full" | "clean"
   ): Promise<void> {
     const types: Array<"full" | "clean"> = historyType ? [historyType] : ["full", "clean"];
 
@@ -216,9 +278,76 @@ export class DualSessionManager {
           await fs.promises.unlink(historyPath);
         }
       } catch (err) {
-        console.error(`[GuardClaw] Failed to clear ${type} history for ${sessionKey}:`, err);
+        console.error(
+          `[GuardClaw] Failed to clear ${type} history for ${sessionKey}:`,
+          err
+        );
       }
     }
+  }
+
+  /**
+   * Load messages that exist in the full track but not in the clean track.
+   * These are Guard Agent interactions and original S3 content that were
+   * stripped from the sanitized transcript — exactly the context a local
+   * model needs to reconstruct the full conversation.
+   */
+  async loadHistoryDelta(
+    sessionKey: string,
+    agentId: string = "main",
+    limit?: number
+  ): Promise<SessionMessage[]> {
+    const full = await this.readHistory(sessionKey, agentId, "full");
+    const clean = await this.readHistory(sessionKey, agentId, "clean");
+
+    if (full.length === 0) return [];
+    if (clean.length === 0) return limit ? full.slice(-limit) : full;
+
+    const cleanSet = new Set(
+      clean.map((m) => `${m.role}:${m.timestamp ?? ""}:${m.content.slice(0, 80)}`)
+    );
+
+    const delta = full.filter(
+      (m) => !cleanSet.has(`${m.role}:${m.timestamp ?? ""}:${m.content.slice(0, 80)}`)
+    );
+
+    return limit && delta.length > limit ? delta.slice(-limit) : delta;
+  }
+
+  /**
+   * Format session messages as a readable conversation context block
+   * suitable for injection via prependContext.
+   */
+  static formatAsContext(messages: SessionMessage[], label?: string): string {
+    if (messages.length === 0) return "";
+
+    const header = label ?? "Full conversation history (original, authoritative)";
+    const lines = [
+      `[${header}]`,
+      `[NOTE: The conversation above may contain "🔒 [Private message]" placeholders or redacted text. This is the complete original history — use it as the authoritative source.]`,
+    ];
+
+    for (const msg of messages) {
+      const roleLabel =
+        msg.role === "user" ? "User" :
+        msg.role === "assistant" ? "Assistant" :
+        msg.role === "tool" ? `Tool${msg.toolName ? `(${msg.toolName})` : ""}` :
+        "System";
+
+      const ts = msg.timestamp
+        ? ` [ts=${new Date(msg.timestamp).toISOString()}]`
+        : "";
+
+      const truncated =
+        msg.content.length > 2000
+          ? msg.content.slice(0, 2000) + "…(truncated)"
+          : msg.content;
+
+      lines.push(`${roleLabel}${ts}: ${truncated}`);
+    }
+
+    lines.push("[End of private context]");
+    return lines.join("\n");
   }
 
   /**
@@ -226,7 +355,7 @@ export class DualSessionManager {
    */
   async getHistoryStats(
     sessionKey: string,
-    agentId: string = "main",
+    agentId: string = "main"
   ): Promise<{
     fullCount: number;
     cleanCount: number;
@@ -246,9 +375,9 @@ export class DualSessionManager {
 // Export a singleton instance
 let defaultManager: DualSessionManager | null = null;
 
-export function getDefaultSessionManager(): DualSessionManager {
-  if (!defaultManager) {
-    defaultManager = new DualSessionManager();
+export function getDefaultSessionManager(baseDir?: string): DualSessionManager {
+  if (!defaultManager || baseDir) {
+    defaultManager = new DualSessionManager(baseDir);
   }
   return defaultManager;
 }
