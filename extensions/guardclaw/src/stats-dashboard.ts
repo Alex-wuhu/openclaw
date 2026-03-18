@@ -13,31 +13,37 @@
  *   - POST /plugins/guardclaw/stats/api/prompts  → save a prompt (hot-reload)
  *   - POST /plugins/guardclaw/stats/api/reset          → reset all token stats
  *   - POST /plugins/guardclaw/stats/api/test-classify → dry-run pipeline classification
+ *   - GET  /plugins/guardclaw/stats/api/presets        → list all presets (builtin + user)
+ *   - POST /plugins/guardclaw/stats/api/presets/apply  → apply a preset (hot-reload)
+ *   - POST /plugins/guardclaw/stats/api/presets/save   → save current config as preset
+ *   - DELETE /plugins/guardclaw/stats/api/presets/:id  → delete a user preset
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { getGlobalCollector } from "./token-stats.js";
-import { getLiveConfig, updateLiveConfig } from "./live-config.js";
-import { getAllSessionStates } from "./session-state.js";
-import { loadPrompt, readPromptFromDisk, writePrompt } from "./prompt-loader.js";
-import { DEFAULT_JUDGE_PROMPT } from "./routers/token-saver.js";
-import { DEFAULT_DETECTION_SYSTEM_PROMPT, DEFAULT_PII_EXTRACTION_PROMPT } from "./local-model.js";
 import type { RouterPipeline } from "./router-pipeline.js";
+import { getLiveConfig, updateLiveConfig } from "./live-config.js";
+import { DEFAULT_DETECTION_SYSTEM_PROMPT, DEFAULT_PII_EXTRACTION_PROMPT } from "./local-model.js";
+import { getCurrentLoopHighestLevel } from "./loop-detection-level.js";
+import {
+  listPresets,
+  applyPreset as applyPresetAction,
+  saveCurrentAsPreset,
+  deletePreset as deletePresetAction,
+} from "./presets.js";
+import { loadPrompt, readPromptFromDisk, writePrompt } from "./prompt-loader.js";
 import { createConfigurableRouter } from "./routers/configurable.js";
+import { DEFAULT_JUDGE_PROMPT } from "./routers/token-saver.js";
+import { getAllSessionStates } from "./session-state.js";
+import { getGlobalCollector } from "./token-stats.js";
 import {
   getLastReplyLoopSummary,
   getLastReplyModelOrigin,
   getLastTurnTokens,
 } from "./usage-intel.js";
-import { getCurrentLoopHighestLevel } from "./loop-detection-level.js";
 
-const GUARDCLAW_CONFIG_PATH = join(
-  process.env.HOME ?? "/tmp",
-  ".openclaw",
-  "guardclaw.json",
-);
+const GUARDCLAW_CONFIG_PATH = join(process.env.HOME ?? "/tmp", ".openclaw", "guardclaw.json");
 
 function saveGuardClawConfig(privacy: Record<string, unknown>): void {
   try {
@@ -45,8 +51,13 @@ function saveGuardClawConfig(privacy: Record<string, unknown>): void {
     mkdirSync(dir, { recursive: true });
     let existing: Record<string, unknown> = {};
     try {
-      existing = JSON.parse(readFileSync(GUARDCLAW_CONFIG_PATH, "utf-8")) as Record<string, unknown>;
-    } catch { /* file may not exist yet */ }
+      existing = JSON.parse(readFileSync(GUARDCLAW_CONFIG_PATH, "utf-8")) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      /* file may not exist yet */
+    }
     const updated = { ...existing, privacy };
     writeFileSync(GUARDCLAW_CONFIG_PATH, JSON.stringify(updated, null, 2), "utf-8");
   } catch {
@@ -105,21 +116,30 @@ export async function statsHttpHandler(
 
   if (req.method === "GET" && sub === "/api/summary") {
     const collector = getGlobalCollector();
-    if (!collector) { json(res, { error: "not initialized" }, 503); return true; }
+    if (!collector) {
+      json(res, { error: "not initialized" }, 503);
+      return true;
+    }
     json(res, collector.getSummary());
     return true;
   }
 
   if (req.method === "GET" && sub === "/api/hourly") {
     const collector = getGlobalCollector();
-    if (!collector) { json(res, { error: "not initialized" }, 503); return true; }
+    if (!collector) {
+      json(res, { error: "not initialized" }, 503);
+      return true;
+    }
     json(res, collector.getHourly());
     return true;
   }
 
   if (req.method === "GET" && sub === "/api/sessions") {
     const collector = getGlobalCollector();
-    if (!collector) { json(res, { error: "not initialized" }, 503); return true; }
+    if (!collector) {
+      json(res, { error: "not initialized" }, 503);
+      return true;
+    }
     json(res, collector.getSessionStats());
     return true;
   }
@@ -166,7 +186,10 @@ export async function statsHttpHandler(
 
   if (req.method === "POST" && sub === "/api/reset") {
     const collector = getGlobalCollector();
-    if (!collector) { json(res, { error: "not initialized" }, 503); return true; }
+    if (!collector) {
+      json(res, { error: "not initialized" }, 503);
+      return true;
+    }
     await collector.reset();
     json(res, { ok: true });
     return true;
@@ -220,14 +243,18 @@ export async function statsHttpHandler(
   }
 
   if (req.method === "POST" && sub === "/api/config") {
-    if (!deps) { json(res, { error: "dashboard not initialized" }, 503); return true; }
+    if (!deps) {
+      json(res, { error: "dashboard not initialized" }, 503);
+      return true;
+    }
     try {
       const body = JSON.parse(await readBody(req));
 
       if (body.privacy) {
         updateLiveConfig(body.privacy);
 
-        const existingPrivacy = ((deps.pluginConfig as Record<string, unknown>).privacy ?? {}) as Record<string, unknown>;
+        const existingPrivacy = ((deps.pluginConfig as Record<string, unknown>).privacy ??
+          {}) as Record<string, unknown>;
         const mergedPrivacy = { ...existingPrivacy, ...body.privacy } as Record<string, unknown>;
 
         // Persist to guardclaw.json (does NOT touch openclaw.json → no restart)
@@ -235,7 +262,10 @@ export async function statsHttpHandler(
 
         // Dynamically register/update configurable routers in the pipeline
         if (body.privacy.routers && deps.pipeline) {
-          const routers = body.privacy.routers as Record<string, { type?: string; enabled?: boolean }>;
+          const routers = body.privacy.routers as Record<
+            string,
+            { type?: string; enabled?: boolean }
+          >;
           for (const [id, reg] of Object.entries(routers)) {
             if (reg.type === "configurable" && !deps.pipeline.hasRouter(id)) {
               deps.pipeline.register(
@@ -247,7 +277,10 @@ export async function statsHttpHandler(
           // Re-configure pipeline with updated router configs and order
           const mergedPrivacy = { ...existingPrivacy, ...body.privacy } as Record<string, unknown>;
           deps.pipeline.configure({
-            routers: mergedPrivacy.routers as Record<string, Parameters<typeof deps.pipeline.register>[1]>,
+            routers: mergedPrivacy.routers as Record<
+              string,
+              Parameters<typeof deps.pipeline.register>[1]
+            >,
             pipeline: mergedPrivacy.pipeline as Record<string, string[]>,
           });
           // Update deps.pluginConfig so test-classify picks up new options
@@ -265,13 +298,25 @@ export async function statsHttpHandler(
   // ── Prompts API ──
 
   const EDITABLE_PROMPTS: Record<string, { label: string; defaultContent: string }> = {
-    "detection-system": { label: "Privacy Detection (S1/S2/S3 Classifier)", defaultContent: DEFAULT_DETECTION_SYSTEM_PROMPT },
-    "token-saver-judge": { label: "Token-Saver (Task Complexity Judge)", defaultContent: DEFAULT_JUDGE_PROMPT },
-    "pii-extraction": { label: "PII Extraction Engine", defaultContent: DEFAULT_PII_EXTRACTION_PROMPT },
+    "detection-system": {
+      label: "Privacy Detection (S1/S2/S3 Classifier)",
+      defaultContent: DEFAULT_DETECTION_SYSTEM_PROMPT,
+    },
+    "token-saver-judge": {
+      label: "Token-Saver (Task Complexity Judge)",
+      defaultContent: DEFAULT_JUDGE_PROMPT,
+    },
+    "pii-extraction": {
+      label: "PII Extraction Engine",
+      defaultContent: DEFAULT_PII_EXTRACTION_PROMPT,
+    },
   };
 
   if (req.method === "GET" && sub === "/api/prompts") {
-    const result: Record<string, { label: string; content: string; isCustom: boolean; defaultContent: string }> = {};
+    const result: Record<
+      string,
+      { label: string; content: string; isCustom: boolean; defaultContent: string }
+    > = {};
     for (const [name, meta] of Object.entries(EDITABLE_PROMPTS)) {
       const fromDisk = readPromptFromDisk(name);
       result[name] = {
@@ -308,14 +353,24 @@ export async function statsHttpHandler(
   // ── Test Classify API ──
 
   if (req.method === "POST" && sub === "/api/test-classify") {
-    if (!deps?.pipeline) { json(res, { error: "pipeline not initialized" }, 503); return true; }
+    if (!deps?.pipeline) {
+      json(res, { error: "pipeline not initialized" }, 503);
+      return true;
+    }
     try {
-      const body = JSON.parse(await readBody(req)) as { message: string; checkpoint?: string; router?: string };
+      const body = JSON.parse(await readBody(req)) as {
+        message: string;
+        checkpoint?: string;
+        router?: string;
+      };
       if (!body.message?.trim()) {
         json(res, { error: "message required" }, 400);
         return true;
       }
-      const checkpoint = (body.checkpoint ?? "onUserMessage") as "onUserMessage" | "onToolCallProposed" | "onToolCallExecuted";
+      const checkpoint = (body.checkpoint ?? "onUserMessage") as
+        | "onUserMessage"
+        | "onToolCallProposed"
+        | "onToolCallExecuted";
 
       if (body.router) {
         const decision = await deps.pipeline.runSingle(
@@ -354,6 +409,53 @@ export async function statsHttpHandler(
     } catch (err) {
       json(res, { error: String(err) }, 500);
     }
+    return true;
+  }
+
+  // ── Presets API ──
+
+  if (req.method === "GET" && sub === "/api/presets") {
+    json(res, listPresets());
+    return true;
+  }
+
+  if (req.method === "POST" && sub === "/api/presets/apply") {
+    try {
+      const body = JSON.parse(await readBody(req)) as { id: string; applyDefaultModel?: boolean };
+      if (!body.id) {
+        json(res, { error: "id required" }, 400);
+        return true;
+      }
+      const result = applyPresetAction(body.id, { applyDefaultModel: body.applyDefaultModel });
+      json(res, result, result.ok ? 200 : 404);
+    } catch (err) {
+      json(res, { error: String(err) }, 400);
+    }
+    return true;
+  }
+
+  if (req.method === "POST" && sub === "/api/presets/save") {
+    try {
+      const body = JSON.parse(await readBody(req)) as { name: string };
+      if (!body.name?.trim()) {
+        json(res, { error: "name required" }, 400);
+        return true;
+      }
+      json(res, saveCurrentAsPreset(body.name));
+    } catch (err) {
+      json(res, { error: String(err) }, 400);
+    }
+    return true;
+  }
+
+  if (req.method === "DELETE" && sub.startsWith("/api/presets/")) {
+    const presetId = decodeURIComponent(sub.slice("/api/presets/".length));
+    if (!presetId) {
+      json(res, { error: "id required" }, 400);
+      return true;
+    }
+    const result = deletePresetAction(presetId);
+    json(res, result, result.ok ? 200 : 400);
     return true;
   }
 
@@ -983,6 +1085,23 @@ function dashboardHtml(): string {
   </div>
 
   <div class="config-section">
+    <h3><span data-i18n="preset.title">Quick Switch</span> <span class="badge badge-hot">instant</span></h3>
+    <div class="hint" style="margin-bottom:14px" data-i18n="preset.desc">Switch between preconfigured LLM provider setups for Local Model and Guard Agent.</div>
+    <div style="display:flex;gap:10px;align-items:flex-end">
+      <div class="field" style="flex:1;margin-bottom:0">
+        <select id="preset-select" onchange="onPresetSelectChange()"></select>
+      </div>
+      <button class="btn btn-primary btn-sm" onclick="applyPreset()" style="height:40px" data-i18n="preset.apply">Apply</button>
+      <button class="btn btn-sm btn-outline" id="preset-delete-btn" onclick="deletePreset()" style="height:40px;display:none;color:#ef4444;border-color:#fca5a5" data-i18n="preset.delete">Delete</button>
+    </div>
+    <div id="preset-info" class="hint" style="display:none;margin-top:8px;color:var(--accent)"></div>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:12px">
+      <input id="preset-save-name" data-i18n-ph="preset.name_ph" placeholder="New preset name..." style="flex:1;padding:10px 14px;background:var(--bg-input);border:1px solid transparent;border-radius:var(--radius-sm);color:var(--text-primary);font-size:13px;outline:none">
+      <button class="btn btn-sm btn-outline" onclick="saveAsPreset()" data-i18n="preset.save_as">Save Current</button>
+    </div>
+  </div>
+
+  <div class="config-section">
     <h3><span data-i18n="cfg.lm">Local Model</span> <span class="badge badge-hot">instant</span></h3>
     <div class="hint" style="margin-bottom:14px" data-i18n="cfg.lm_desc">Configure the LLM used locally for privacy classification and PII redaction.</div>
     <div class="field-toggle">
@@ -1299,6 +1418,25 @@ var T = {
   'cfg.rd_pin':{en:'PIN / Pin Code',zh:'PIN 码'},
   'cfg.save':{en:'Save Configuration',zh:'保存配置'},
   'cfg.saved':{en:'Configuration saved',zh:'配置已保存'},
+  'preset.title':{en:'Quick Switch',zh:'快速切换'},
+  'preset.desc':{en:'Switch between preconfigured LLM provider setups for Local Model and Guard Agent.',zh:'在预配置的 LLM 供应商组合之间快速切换（本地模型 + 守护 Agent）。'},
+  'preset.apply':{en:'Apply',zh:'应用'},
+  'preset.delete':{en:'Delete',zh:'删除'},
+  'preset.save_as':{en:'Save Current',zh:'保存当前'},
+  'preset.name_ph':{en:'New preset name...',zh:'新预设名称...'},
+  'preset.select_ph':{en:'-- Select a preset --',zh:'-- 选择预设 --'},
+  'preset.select_first':{en:'Please select a preset first',zh:'请先选择一个预设'},
+  'preset.applied':{en:'Preset applied',zh:'预设已应用'},
+  'preset.saved':{en:'Preset saved',zh:'预设已保存'},
+  'preset.deleted':{en:'Preset deleted',zh:'预设已删除'},
+  'preset.delete_confirm':{en:'Delete this custom preset?',zh:'确定要删除这个自定义预设吗？'},
+  'preset.name_required':{en:'Please enter a preset name',zh:'请输入预设名称'},
+  'preset.builtin':{en:'Built-in',zh:'内置'},
+  'preset.custom':{en:'Custom',zh:'自定义'},
+  'preset.includes_default':{en:'Default model: ',zh:'默认模型：'},
+  'preset.confirm_default_1':{en:'This preset will also change the default model to ',zh:'此预设还将把默认模型切换为 '},
+  'preset.confirm_default_2':{en:'. This requires a gateway restart. Apply default model change?',zh:'。此操作需要重启 Gateway 才能生效。是否同时切换默认模型？'},
+  'preset.applied_restart':{en:'Preset applied. Restart gateway for default model change.',zh:'预设已应用。请重启 Gateway 以使默认模型生效。'},
   'common.add':{en:'Add',zh:'添加'},
   'common.save':{en:'Save',zh:'保存'},
   'common.delete':{en:'Delete',zh:'删除'},
@@ -1857,6 +1995,142 @@ async function loadConfig() {
 
 document.getElementById('cfg-lm-type').addEventListener('change', toggleModuleField);
 
+// ── Presets ──
+
+var _presets = [];
+var _activePreset = null;
+var _currentDefaultModel = null;
+
+async function loadPresets() {
+  try {
+    var data = await fetch(BASE + '/presets').then(function(r) { return r.json(); });
+    _presets = data.presets || [];
+    _activePreset = data.activePreset || null;
+    _currentDefaultModel = data.currentDefaultModel || null;
+    renderPresetSelect();
+  } catch (e) { /* non-critical */ }
+}
+
+function renderPresetSelect() {
+  var sel = document.getElementById('preset-select');
+  var builtins = _presets.filter(function(p) { return p.builtin; });
+  var customs = _presets.filter(function(p) { return !p.builtin; });
+  var html = '<option value="">' + t('preset.select_ph') + '</option>';
+  if (builtins.length) {
+    html += '<optgroup label="' + t('preset.builtin') + '">';
+    builtins.forEach(function(p) {
+      var dm = p.defaultModel ? ' [' + p.defaultModel + ']' : '';
+      html += '<option value="' + p.id + '"' + (p.id === _activePreset ? ' selected' : '') + '>' + escHtml(p.name) + escHtml(dm) + '</option>';
+    });
+    html += '</optgroup>';
+  }
+  if (customs.length) {
+    html += '<optgroup label="' + t('preset.custom') + '">';
+    customs.forEach(function(p) {
+      var dm = p.defaultModel ? ' [' + p.defaultModel + ']' : '';
+      html += '<option value="' + p.id + '"' + (p.id === _activePreset ? ' selected' : '') + '>' + escHtml(p.name) + escHtml(dm) + '</option>';
+    });
+    html += '</optgroup>';
+  }
+  sel.innerHTML = html;
+  onPresetSelectChange();
+}
+
+function onPresetSelectChange() {
+  var id = document.getElementById('preset-select').value;
+  var preset = _presets.find(function(p) { return p.id === id; });
+  var deleteBtn = document.getElementById('preset-delete-btn');
+  deleteBtn.style.display = (preset && !preset.builtin) ? 'inline-block' : 'none';
+  var infoEl = document.getElementById('preset-info');
+  if (preset && preset.defaultModel) {
+    infoEl.textContent = t('preset.includes_default') + preset.defaultModel;
+    infoEl.style.display = 'block';
+  } else {
+    infoEl.style.display = 'none';
+  }
+}
+
+async function applyPreset() {
+  var id = document.getElementById('preset-select').value;
+  if (!id) { showToast(t('preset.select_first'), true); return; }
+  var preset = _presets.find(function(p) { return p.id === id; });
+  var applyDefaultModel = false;
+
+  if (preset && preset.defaultModel && preset.defaultModel !== _currentDefaultModel) {
+    applyDefaultModel = confirm(
+      t('preset.confirm_default_1') + preset.defaultModel +
+      t('preset.confirm_default_2')
+    );
+  }
+
+  try {
+    var res = await fetch(BASE + '/presets/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: id, applyDefaultModel: applyDefaultModel }),
+    });
+    var result = await res.json();
+    if (result.ok) {
+      _activePreset = id;
+      if (result.needsRestart) {
+        showToast(t('preset.applied_restart'));
+      } else if (result.defaultModelError) {
+        showToast(t('preset.applied') + ' (' + result.defaultModelError + ')', true);
+      } else {
+        showToast(t('preset.applied'));
+      }
+      loadConfig();
+      loadPresets();
+    } else {
+      showToast(t('common.save_failed') + (result.error || 'unknown'), true);
+    }
+  } catch (e) {
+    showToast(t('common.save_failed') + e.message, true);
+  }
+}
+
+async function saveAsPreset() {
+  var name = document.getElementById('preset-save-name').value.trim();
+  if (!name) { showToast(t('preset.name_required'), true); return; }
+  try {
+    var res = await fetch(BASE + '/presets/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name }),
+    });
+    var result = await res.json();
+    if (result.ok) {
+      document.getElementById('preset-save-name').value = '';
+      showToast(t('preset.saved'));
+      loadPresets();
+    } else {
+      showToast(t('common.save_failed') + (result.error || 'unknown'), true);
+    }
+  } catch (e) {
+    showToast(t('common.save_failed') + e.message, true);
+  }
+}
+
+async function deletePreset() {
+  var id = document.getElementById('preset-select').value;
+  if (!id) return;
+  if (!confirm(t('preset.delete_confirm'))) return;
+  try {
+    var res = await fetch(BASE + '/presets/' + encodeURIComponent(id), {
+      method: 'DELETE',
+    });
+    var result = await res.json();
+    if (result.ok) {
+      showToast(t('preset.deleted'));
+      loadPresets();
+    } else {
+      showToast(t('common.save_failed') + (result.error || 'unknown'), true);
+    }
+  } catch (e) {
+    showToast(t('common.save_failed') + e.message, true);
+  }
+}
+
 async function saveConfig() {
   try {
     var typeVal = document.getElementById('cfg-lm-type').value;
@@ -1905,6 +2179,7 @@ async function saveConfig() {
     var result = await res.json();
     if (result.ok) {
       showToast(t('cfg.saved'));
+      loadPresets();
     } else {
       showToast(t('common.save_failed') + (result.error || 'unknown'), true);
     }
@@ -2454,6 +2729,7 @@ async function saveCustomRouter(id) {
 // ── Init ──
 refreshAll();
 loadConfig();
+loadPresets();
 loadPrompts();
 setInterval(refreshAll, 30000);
 if (LANG !== 'en') setLang(LANG);
