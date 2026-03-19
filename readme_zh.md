@@ -192,7 +192,7 @@ Prompt 哈希缓存（SHA-256，TTL 5 分钟），相同请求不重复 Judge，
 
 ### 省多少？
 
-以典型编程助手工作流为例，Token-Saver 可将 **60–80% 的请求** 转发到更便宜的模型。
+以典型编程助手工作流为例，、性价比感知路由可将 **60–80% 的请求** 转发到更便宜的模型。
 
 ---
 
@@ -355,7 +355,7 @@ pnpm openclaw gateway run
 
 EdgeClaw 自动拦截和转发，无需修改任何业务逻辑。
 
-### 4.（可选）启用 Token-Saver
+### 4.（可选）启用 性价比感知路由
 
 在 `privacy.routers` 中开启：
 
@@ -512,7 +512,7 @@ extensions/guardclaw/
 │   ├── memory-isolation.ts     # 双轨记忆管理
 │   └── routers/
 │       ├── privacy.ts          # 隐私路由器（安全）
-│       └── token-saver.ts      # Token-Saver 路由器（省钱）
+│       └── token-saver.ts      # 性价比感知路由器（省钱）
 │
 ├── prompts/                    # 可自定义 Prompt 模板
 │   ├── detection-system.md
